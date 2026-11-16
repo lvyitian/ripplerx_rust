@@ -696,7 +696,7 @@ Add a `#[cfg(test)] mod tests` block with:
 - `a_new_waveguide_has_the_cpp_defaults` — asserting the initial values.
 - `an_impulse_returns_after_the_delay` — asserting that a single impulse comes back after `srate / f_k` samples, with the right sign for a closed tube.
 - `a_closed_tube_inverts_the_returned_signal` — asserting the sign difference between an open and a closed tube.
-- `the_radius_damps_the_high_frequencies` — asserting that a larger radius gives a smaller output for a high-frequency input.
+- `the_radius_damps_the_high_frequencies` — the waveguide's damping line is `y = radius * sample + (1.0 - radius) * y1`, which is a one-pole low-pass with a DC gain of 1 and a Nyquist gain of `radius / (2.0 - radius)`. So a **smaller** radius damps the high frequencies harder, not a larger one. Assert that direction, with a comment showing the derivation.
 - `the_waveguide_survives_a_frequency_below_the_tube_length` — asserting that a `f_k` low enough to make `tlen` exceed the tube length still produces finite output rather than panicking. This is the case the C++ gets wrong.
 - `clearing_resets_the_tube` — asserting the output goes to silence after `clear`.
 
@@ -781,11 +781,18 @@ Create `rust/crates/rippler-dsp/src/resonator.rs` with:
         // Map 1..0 to 20..20000, with an inverse scale for a negative value.
         let freq = 20.0 * (20000.0f64 / 20.0).powf(if settings.cut < 0.0 { 1.0 + settings.cut } else { settings.cut });
         if settings.cut < 0.0 {
-            self.filter = Filter::low_pass(srate, freq, 0.707);
+            self.filter.copy_from(&Filter::low_pass(srate, freq, 0.707));
         } else {
-            self.filter = Filter::high_pass(srate, freq, 0.707);
+            self.filter.copy_from(&Filter::high_pass(srate, freq, 0.707));
         }
 ```
+
+**Use `copy_from`, not assignment.** The C++'s `filter.lp(...)` sets the coefficients
+in place and leaves the filter's history alone, and `PluginProcessor.cpp` runs
+`voice.resA.filter.df1(out)` on the audio path, so that history matters.
+Assigning a freshly constructed filter would reset it and diverge from the
+C++. `Filter::copy_from` copies the coefficients only, which is exactly the
+C++'s `Filter::copy` semantics.
 
 Then the per-partial parameter assignment and the waveguide settings, ported exactly.
 
@@ -867,6 +874,39 @@ git diff --stat <commit-before-this-plan>..HEAD -- src/ libs/ resources/ CMakeLi
 ```
 
 Expected: no output.
+
+## Findings from executing this plan
+
+The implementation landed as seven commits on `master`:
+
+| Commit | What |
+|---|---|
+| `c89815f` | `models.rs` — the modal models and their ratio tables |
+| `f33a6a1` | `luts.rs` — the lookup table owner |
+| `fc879c3` | `partial.rs` — the bandpass partial |
+| `78b113a` | `waveguide.rs` — the tube waveguide |
+| `f0653f5` | `resonator.rs` — the resonator bank |
+| `b2aba46` | exposes the resonator's `partials`, `waveguide` and `filter` as public fields |
+| `1d40784` | documents the swapped tube tables at the model enum |
+
+The plan's code blocks above are the *specification*, not a mirror of the
+committed files. Where they differ in detail, the committed implementation is the
+authority.
+
+- **The C++ waveguide segfaults when the tube is longer than the delay line.** With
+  `f_k` low enough that `srate / f_k` exceeds the 20 000-sample tube, the C++
+  computes `read_ptr_frac = write_ptr - tlen` and adds `tube_len` once, which
+  leaves the position negative, and then reads `tube[(int)read_ptr_frac]`. With
+  the heap ahead of the tube poisoned, the C++ segfaults on the first sample; the
+  Rust wraps the index with `rem_euclid` and produces finite output. Unpoisoned,
+  the C++ happened to read zeroes and the two coincided, so the bug is invisible
+  without the poisoning. The Rust behaviour is the intended one.
+- **`Resonator`'s `partials`, `waveguide` and `filter` are public**, matching the
+  C++. Plan 3's voice code needs to reach the resonator's filter on the audio
+  path, the way `PluginProcessor.cpp` does with `voice.resA.filter.df1(out)`.
+- **The model tables are read on the audio thread** and are immutable, so the
+  plugin holds them by reference and replaces a table wholesale when the ratio
+  parameter changes.
 
 ## Notes for the next plan
 

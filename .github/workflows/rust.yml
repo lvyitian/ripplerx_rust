@@ -64,7 +64,9 @@ jobs:
           restore-keys: ${{ matrix.os }}-cargo-
 
       - name: Install the bundler
-        run: cargo install cargo-nice-plug --locked
+        # `--force` because the cached `~/.cargo/bin` may already hold the
+        # binary, and cargo refuses to overwrite it otherwise.
+        run: cargo install cargo-nice-plug --locked --force
 
       - name: Check formatting
         run: cargo fmt --all -- --check

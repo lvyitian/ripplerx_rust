@@ -110,10 +110,23 @@ Create `rust/crates/rippler-dsp/src/lib.rs`:
 //!
 //! This crate has no dependency on any plugin framework. Everything here is
 //! portable, testable in isolation, and free of allocation on the audio path.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+pub mod comb;
+pub mod envelope;
+pub mod filter;
+pub mod limiter;
+pub mod lut;
+pub mod rng;
+pub mod utils;
 ```
 
 The module declarations are added one at a time by the tasks that create them,
-so the crate always compiles.
+so the crate always compiles. The crate lints came out of the final review:
+`forbid(unsafe_code)` holds the line on the audio path, and `missing_docs`
+keeps every public item documented.
 
 - [ ] **Step 3: Create `rippler-params`**
 
@@ -252,6 +265,7 @@ pub struct LookupTable {
     offset: f64,
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl LookupTable {
     /// Builds a table by sampling `f` at `size` evenly spaced points across
     /// `[min, max]`.
@@ -287,9 +301,10 @@ impl LookupTable {
         let input = input.clamp(self.min_value, self.max_value);
         let normalized_index = input * self.scaler + self.offset;
         let index = normalized_index.floor() as usize;
+        let last = self.values.len().saturating_sub(1);
 
-        if index >= self.values.len() - 1 {
-            return self.values[self.values.len() - 1];
+        if index >= last {
+            return self.values[last];
         }
 
         let frac = normalized_index - index as f64;
@@ -308,13 +323,14 @@ impl LookupTable {
     pub fn cubic(&self, input: f64) -> f64 {
         let input = input.clamp(self.min_value, self.max_value);
         let index = input * self.scaler + self.offset;
-        let i = (index.floor() as usize).min(self.values.len() - 1);
+        let last = self.values.len().saturating_sub(1);
+        let i = (index.floor() as usize).min(last);
         let t = index - i as f64;
 
         let i0 = i.saturating_sub(1);
         let i1 = i;
-        let i2 = (i + 1).min(self.values.len() - 1);
-        let i3 = (i + 2).min(self.values.len() - 1);
+        let i2 = (i + 1).min(last);
+        let i3 = (i + 2).min(last);
 
         let y0 = self.values[i0];
         let y1 = self.values[i1];
@@ -342,12 +358,6 @@ impl LookupTable {
     /// The number of samples in the table.
     pub fn len(&self) -> usize {
         self.values.len()
-    }
-
-    /// Whether the table holds no samples. Always false, since `new` panics
-    /// below two samples.
-    pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
     }
 
     /// The raw sample values.
@@ -1040,7 +1050,8 @@ Create `rust/crates/rippler-dsp/src/envelope.rs`:
 //! Port of `src/dsp/Envelope.{h,cpp}`, which is a port of Envlib (by dwelx)
 //! based on zenvelib.v1.
 //!
-//! The sustain level is expressed in decibels, matching the C++.
+//! The sustain level is given to [`Envelope::init`] in decibels and stored as
+//! a linear gain, matching the C++.
 
 /// The stage an envelope is currently in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1065,7 +1076,10 @@ pub struct Envelope {
     pub att: f64,
     /// Decay time in samples.
     pub dec: f64,
-    /// Sustain level as a linear gain.
+    /// The sustain level as a linear gain.
+    ///
+    /// [`Envelope::init`] takes the sustain level in decibels and converts it
+    /// into this linear gain.
     pub sus: f64,
     /// Release time in samples.
     pub rel: f64,
@@ -1085,6 +1099,7 @@ pub struct Envelope {
     ta: f64,
     td: f64,
     tr: f64,
+    initialised: bool,
 }
 
 /// Maps a tension in `[-1, 1]` onto the internal range `[0.001..1, 100]`.
@@ -1156,6 +1171,8 @@ impl Envelope {
         self.ta = normalize_tension(tension_a);
         self.td = normalize_tension(-tension_d);
         self.tr = normalize_tension(-tension_r);
+
+        self.initialised = true;
     }
 
     /// Recomputes the attack and decay coefficients for the current scale.
@@ -1183,7 +1200,16 @@ impl Envelope {
     }
 
     /// Starts the attack stage towards `scale`.
+    ///
+    /// An envelope that has not been configured by [`Envelope::init`] has no
+    /// attack rate, and starting it would divide by a zero rate and jump
+    /// straight to full scale. The attack is therefore ignored and the
+    /// envelope stays off until it has been initialised.
     pub fn attack(&mut self, scale: f64) {
+        if !self.initialised {
+            return;
+        }
+
         self.scale = scale;
         self.recalc_coefs();
         self.state = Stage::Attack;
@@ -1257,6 +1283,40 @@ mod tests {
         let mut env = Envelope::new();
         env.init(SRATE, 1.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
         assert!((env.sus - 0.031_622_776_601_683_8).abs() < 1e-15);
+    }
+
+    #[test]
+    fn attacking_an_uninitialised_envelope_does_nothing() {
+        // Without an `init` call there is no attack rate, and starting the
+        // attack would divide by a zero rate and jump straight to full
+        // scale, which is a loud click on the audio thread.
+        let mut env = Envelope::new();
+        env.attack(1.0);
+
+        assert_eq!(env.state, Stage::Off);
+        assert_eq!(env.env, 0.0);
+
+        // The envelope stays off until it is initialised.
+        for _ in 0..1000 {
+            assert_eq!(env.process(), Stage::Off);
+        }
+        assert_eq!(env.env, 0.0);
+    }
+
+    #[test]
+    fn an_initialised_envelope_still_attacks() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 5.0, 50.0, -30.0, 100.0, 0.0, 0.0, 0.0);
+        env.attack(1.0);
+
+        assert_eq!(env.state, Stage::Attack);
+
+        let mut previous = env.env;
+        for _ in 0..100 {
+            env.process();
+            assert!(env.env > previous, "the attack did not rise");
+            previous = env.env;
+        }
     }
 
     #[test]
@@ -1718,12 +1778,19 @@ impl Limiter {
     /// `ln(10) / 20`.
     const DB2LOG: f64 = 0.115_129_254_649_702_284_200_899_572_734_22;
 
-    /// Creates an uninitialised limiter. Call [`Limiter::init`] before use.
+    /// Creates a limiter configured with the defaults the plugin uses.
     ///
-    /// This is the same value as [`Limiter::default`]: the two conversion
-    /// constants are filled in, so that `init` computes a usable `capsc`.
-    pub fn new() -> Self {
-        Self {
+    /// The limiter is initialised with a threshold of 0 dB, a bias of 70%, an
+    /// RMS window of 100 ms and no makeup gain, so it is usable straight away
+    /// and cannot produce `NaN`. Call [`Limiter::init`] to reconfigure it.
+    ///
+    /// This is the same output as the C++ default-constructed limiter
+    /// followed by a single `init` call with those parameters: `init` reads
+    /// the RMS window before assigning it, so the RMS coefficient is zero on
+    /// that first call, and it is zero here as well. The limiter therefore
+    /// behaves identically to the original from the very first sample.
+    pub fn new(srate: f64) -> Self {
+        let mut limiter = Self {
             log2db: Self::LOG2DB,
             db2log: Self::DB2LOG,
             rundb: 0.0,
@@ -1741,7 +1808,18 @@ impl Limiter {
             relcoef: 0.0,
             rmstime: 0.0,
             rmscoef: 0.0,
-        }
+        };
+
+        limiter.init(srate, 0.0, 70.0, 100.0, 0.0);
+
+        // `init` reads `rmstime` before assigning it, so the RMS coefficient
+        // of this first configuration is zero. Clearing `rmstime` keeps that
+        // "first configuration" property for any later `init` call, which
+        // makes `new` followed by `init` behave exactly like the C++'s
+        // default-constructed limiter followed by a single `init`.
+        limiter.rmstime = 0.0;
+
+        limiter
     }
 
     /// Configures the limiter.
@@ -1801,17 +1879,6 @@ impl Limiter {
     }
 }
 
-impl Default for Limiter {
-    /// Same as [`Limiter::new`].
-    ///
-    /// A derived `Default` would leave the conversion constants at zero and
-    /// make `init` compute a `capsc` of zero, so the limiter would do
-    /// nothing. Delegating keeps the two constructors identical.
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1819,9 +1886,7 @@ mod tests {
     const SRATE: f64 = 48_000.0;
 
     fn limiter() -> Limiter {
-        let mut limiter = Limiter::new();
-        limiter.init(SRATE, 0.0, 70.0, 100.0, 0.0);
-        limiter
+        Limiter::new(SRATE)
     }
 
     #[test]
@@ -1867,7 +1932,7 @@ mod tests {
 
     #[test]
     fn makeup_gain_is_applied() {
-        let mut limiter = Limiter::new();
+        let mut limiter = Limiter::new(SRATE);
         limiter.init(SRATE, 0.0, 70.0, 100.0, 6.0);
         let (left, _) = limiter.process(0.5, 0.5);
         let expected = 0.5 * 10f64.powf(6.0 / 20.0);
@@ -1884,26 +1949,51 @@ mod tests {
     }
 
     #[test]
-    fn the_default_limiter_behaves_like_a_new_one() {
-        let mut from_default = Limiter::default();
-        let mut from_new = Limiter::new();
+    fn a_new_limiter_is_already_initialised() {
+        // The point of the old `Default` test was that the two constructors
+        // must not disagree. `Default` is gone, so the equivalent guarantee
+        // is that `new` alone leaves the limiter configured and working.
+        let mut loud = Limiter::new(SRATE);
 
-        from_default.init(SRATE, 0.0, 70.0, 100.0, 0.0);
-        from_new.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+        // A limiter with a zero `capsc` would leave the signal completely
+        // alone, so a loud signal must still be attenuated here.
+        assert!(loud.process(2.0, 2.0).0 < 2.0);
 
-        // A limiter built with a derived `Default` would have a `capsc` of
-        // zero and would leave the signal completely alone, so a loud signal
-        // must still be attenuated here.
+        // A fresh limiter and one that has been reconfigured with the same
+        // parameters must behave identically.
+        let mut fresh = Limiter::new(SRATE);
+        let mut reconfigured = Limiter::new(SRATE);
+        reconfigured.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+
         for n in 0..1000 {
             let input = (n as f64 * 0.01).sin() * 2.0;
-            let (default_left, default_right) = from_default.process(input, -input);
-            let (new_left, new_right) = from_new.process(input, -input);
+            let (left, right) = fresh.process(input, -input);
+            let (reference_left, reference_right) = reconfigured.process(input, -input);
 
-            assert_eq!(default_left, new_left, "left diverged at {n}");
-            assert_eq!(default_right, new_right, "right diverged at {n}");
+            assert_eq!(left, reference_left, "left diverged at {n}");
+            assert_eq!(right, reference_right, "right diverged at {n}");
         }
+    }
 
-        assert!(from_default.process(2.0, 2.0).0 < 2.0);
+    #[test]
+    fn a_new_limiter_does_not_produce_nan() {
+        // The C++ leaves the ratio and the makeup gain at zero until `init`
+        // is called, which makes its output `NaN`. The Rust constructor
+        // initialises the limiter, so this cannot happen.
+        let mut limiter = Limiter::new(SRATE);
+
+        let (left, right) = limiter.process(0.5, -0.5);
+        assert!(left.is_finite(), "left was {left}");
+        assert!(right.is_finite(), "right was {right}");
+        assert!((left - 0.5).abs() < 1e-12, "left was {left}");
+        assert!((right + 0.5).abs() < 1e-12, "right was {right}");
+
+        for n in 0..1000 {
+            let input = (n as f64 * 0.01).sin() * 2.0;
+            let (left, right) = limiter.process(input, -input);
+            assert!(left.is_finite(), "left was {left}");
+            assert!(right.is_finite(), "right was {right}");
+        }
     }
 
     #[test]
@@ -1912,8 +2002,8 @@ mod tests {
         // so on a first `init` the coefficient is zero and the RMS window has
         // no effect at all. A refactor that fixes the ordering would change
         // the sound, so the quirk is pinned here.
-        let mut short_window = Limiter::new();
-        let mut long_window = Limiter::new();
+        let mut short_window = Limiter::new(SRATE);
+        let mut long_window = Limiter::new(SRATE);
 
         short_window.init(SRATE, 0.0, 70.0, 1.0, 0.0);
         long_window.init(SRATE, 0.0, 70.0, 500.0, 0.0);
@@ -1991,6 +2081,179 @@ cmake --build ./build --config Release
 JUCE rejects MinGW outright, so this needs the MSVC C++ toolchain. On a machine
 without it, the `git diff` check above is the verification, and the limitation
 should be recorded rather than worked around.
+
+## Hardening pass
+
+A final whole-crate review, after the per-task reviews, produced a set of changes
+that are recorded here rather than as separate plan tasks:
+
+- The crate gained `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`.
+- `LookupTable` computes its last index with `saturating_sub(1)`, so a future
+  change that allows an empty table cannot underflow and panic. Its `is_empty`
+  method, which could never return true, was removed in favour of
+  `#[allow(clippy::len_without_is_empty)]`.
+- `Limiter::new` now takes the sample rate and initialises the limiter with the
+  defaults the plugin uses, so an uninitialised limiter cannot produce NaN. The
+  `Default` implementation was removed, since it had no sensible sample-rate-free
+  default and was the thing that made the trap reachable. `new(srate)` clears
+  `rmstime` after initialising, so a later `init` still sees the "first
+  configuration" the C++ sees and the two stay bit-identical.
+- `Envelope` tracks whether it has been initialised, and `attack` on an
+  uninitialised envelope leaves it silent instead of producing a full-scale click.
+- `utils.rs` ports the `Utils` conversion helpers from `src/dsp/Utils.h`:
+  `gainTodB`, `normalToFreq`, `freqToNormal` and their `f32` variants.
+
+Create `rust/crates/rippler-dsp/src/utils.rs`:
+
+```rust
+//! Small conversion helpers.
+//!
+//! Port of the `Utils` class in `src/dsp/Utils.h`.
+
+/// Conversion helpers between normalised values, frequencies and decibels.
+///
+/// Port of the `Utils` class in `src/dsp/Utils.h`. The helpers are stateless,
+/// so they are associated functions on an otherwise empty struct.
+pub struct Utils;
+
+impl Utils {
+    /// `log(20000 / 20)`, the span of the normalised frequency range.
+    pub const LOG_MAX_OVER_MIN_FREQ: f64 = 6.907_755_278_982_137;
+
+    /// Maps a normalised frequency onto a frequency in hertz.
+    ///
+    /// This is the C++ `Utils::normalToFreq`. A normalised value of zero is
+    /// 20 Hz and one is 20 kHz.
+    pub fn normal_to_freq(norm: f64) -> f64 {
+        20.0 * (norm * Self::LOG_MAX_OVER_MIN_FREQ).exp()
+    }
+
+    /// Maps a frequency in hertz onto its normalised position.
+    ///
+    /// This is the C++ `Utils::freqToNormal`, the inverse of
+    /// [`Utils::normal_to_freq`].
+    pub fn freq_to_normal(norm: f64) -> f64 {
+        (norm / 20.0).ln() / Self::LOG_MAX_OVER_MIN_FREQ
+    }
+
+    /// Converts a linear gain into decibels.
+    ///
+    /// This is the C++ `Utils::gainTodB`. A gain of zero maps to `-60` rather
+    /// than to negative infinity.
+    pub fn gain_to_db(gain: f64) -> f64 {
+        if gain == 0.0 {
+            -60.0
+        } else {
+            20.0 * gain.log10()
+        }
+    }
+
+    /// Maps a normalised value onto a frequency between `min` and `max`.
+    ///
+    /// This is the C++ `Utils::normalToFreqf`, which works in single
+    /// precision.
+    pub fn normal_to_freqf(min: f32, max: f32, norm: f32) -> f32 {
+        min * (norm * (max / min).ln()).exp()
+    }
+
+    /// Maps a frequency between `min` and `max` onto its normalised position.
+    ///
+    /// This is the C++ `Utils::freqToNormalf`, the inverse of
+    /// [`Utils::normal_to_freqf`].
+    pub fn freq_to_normalf(min: f32, max: f32, norm: f32) -> f32 {
+        (norm / min).ln() / (max / min).ln()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_constant_is_the_span_of_the_frequency_range() {
+        assert_eq!(Utils::LOG_MAX_OVER_MIN_FREQ, (20_000f64 / 20.0).ln());
+        assert_eq!(Utils::LOG_MAX_OVER_MIN_FREQ, 1000f64.ln());
+    }
+
+    #[test]
+    fn a_normalised_frequency_maps_onto_the_audio_range() {
+        assert!((Utils::normal_to_freq(0.0) - 20.0).abs() < 1e-12);
+        assert!((Utils::normal_to_freq(1.0) - 20_000.0).abs() < 1e-9);
+        assert!((Utils::normal_to_freq(0.5) - 632.455_532_033_675_9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_frequency_maps_onto_its_normalised_position() {
+        assert!((Utils::freq_to_normal(20.0) - 0.0).abs() < 1e-12);
+        assert!((Utils::freq_to_normal(20_000.0) - 1.0).abs() < 1e-12);
+        assert!((Utils::freq_to_normal(1000.0) - 0.566_323_334_778_672_9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_normalised_frequency_helpers_invert_each_other() {
+        for norm in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
+            let frequency = Utils::normal_to_freq(norm);
+            let round_trip = Utils::freq_to_normal(frequency);
+            assert!(
+                (round_trip - norm).abs() < 1e-12,
+                "{norm} round tripped to {round_trip}"
+            );
+        }
+
+        for frequency in [20.0, 100.0, 440.0, 1000.0, 10_000.0, 20_000.0] {
+            let norm = Utils::freq_to_normal(frequency);
+            let round_trip = Utils::normal_to_freq(norm);
+            assert!(
+                (round_trip - frequency).abs() < 1e-9,
+                "{frequency} round tripped to {round_trip}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gain_maps_onto_decibels() {
+        assert_eq!(Utils::gain_to_db(1.0), 0.0);
+        assert!((Utils::gain_to_db(0.5) + 6.020_599_913_279_624).abs() < 1e-12);
+        assert!((Utils::gain_to_db(2.0) - 6.020_599_913_279_625).abs() < 1e-12);
+        assert!((Utils::gain_to_db(0.1) + 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_gain_of_zero_maps_onto_minus_sixty_decibels() {
+        // Not negative infinity, which is what a plain logarithm would give.
+        assert_eq!(Utils::gain_to_db(0.0), -60.0);
+        assert!(Utils::gain_to_db(0.0).is_finite());
+    }
+
+    #[test]
+    fn a_normalised_value_maps_onto_a_bounded_frequency() {
+        assert!((Utils::normal_to_freqf(20.0, 20_000.0, 0.0) - 20.0).abs() < 1e-3);
+        assert!((Utils::normal_to_freqf(20.0, 20_000.0, 1.0) - 20_000.0).abs() < 1.0);
+        assert!((Utils::normal_to_freqf(100.0, 1000.0, 0.5) - 316.227_78).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_bounded_frequency_maps_onto_its_normalised_position() {
+        assert!((Utils::freq_to_normalf(20.0, 20_000.0, 20.0) - 0.0).abs() < 1e-6);
+        assert!((Utils::freq_to_normalf(20.0, 20_000.0, 20_000.0) - 1.0).abs() < 1e-6);
+        assert!((Utils::freq_to_normalf(100.0, 1000.0, 316.227_78) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_bounded_frequency_helpers_invert_each_other() {
+        for norm in [0.0f32, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
+            let frequency = Utils::normal_to_freqf(20.0, 20_000.0, norm);
+            let round_trip = Utils::freq_to_normalf(20.0, 20_000.0, frequency);
+            assert!(
+                (round_trip - norm).abs() < 1e-5,
+                "{norm} round tripped to {round_trip}"
+            );
+        }
+    }
+}
+```
+
+Add `pub mod utils;` to `rust/crates/rippler-dsp/src/lib.rs`.
 
 ## Decisions carried into Plan 2 (the modal core)
 

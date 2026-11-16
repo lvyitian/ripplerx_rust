@@ -129,11 +129,12 @@ cd ripplerx_rust/rust
 cargo build --release
 
 # bundle the VST3 and CLAP plugins
-cargo install cargo-nice-plug --locked
-cargo nice-plug bundle -p rippler-plugin --release
+cargo xtask bundle -p rippler-plugin --release
 ```
 
-The bundles land in `rust/target/bundled/`.
+The bundles land in `rust/target/bundled/`. The `xtask` is part of the
+workspace, so there is nothing to install; it bundles the plugins and writes
+the VST3 module information file that the JUCE build also shipped.
 
 The Rust build produces **VST3 and CLAP**. The JUCE build also produced AU and
 LV2; nice-plug cannot build those formats, so they are not part of the Rust

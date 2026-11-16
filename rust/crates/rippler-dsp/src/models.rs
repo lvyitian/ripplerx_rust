@@ -33,9 +33,19 @@ pub enum ModalModel {
     Drumhead = 5,
     /// A marimba bar, measured from a Chromaphone sample.
     Marimba = 6,
-    /// An open tube. See the note on the table order below.
+    /// An open tube.
+    ///
+    /// The C++'s table order is swapped: `ModalModels::OpenTube` is index 7,
+    /// but `aModels[7]` holds the **closed** tube's harmonics. The swap is
+    /// reproduced deliberately, and its effect is limited to the serial
+    /// coupling frequency shift. See `MODEL_RATIOS`.
     OpenTube = 7,
-    /// A closed tube. See the note on the table order below.
+    /// A closed tube.
+    ///
+    /// The C++'s table order is swapped: `ModalModels::ClosedTube` is index
+    /// 8, but `aModels[8]` holds the **open** tube's harmonics. The swap is
+    /// reproduced deliberately, and its effect is limited to the serial
+    /// coupling frequency shift. See `MODEL_RATIOS`.
     ClosedTube = 8,
     /// A marimba bar, from the Faust modal model library.
     Marimba2 = 9,

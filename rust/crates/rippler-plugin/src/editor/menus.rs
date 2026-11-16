@@ -13,9 +13,9 @@
 
 use egui::{Response, Ui};
 use rippler_dsp::mallet::MalletType;
-use rippler_dsp::sampler::Sampler;
 use rippler_params::legacy::read_legacy_patch;
 use rippler_params::patch::{PATCH_VERSION, Patch, convert_legacy_patch, read_patch, write_patch};
+use std::sync::atomic::Ordering;
 
 use crate::editor::panels::Panels;
 use crate::editor::settings::UI_SCALES;
@@ -136,16 +136,33 @@ static PRESETS: [(&str, &[u8]); 28] = [
     ),
 ];
 
+/// The name the patch menu shows.
+///
+/// The JUCE editor's patch menu shows the name of the program it is on, and
+/// "Patch" when it is not on one of the factory presets.
+fn program_name(program: i32) -> &'static str {
+    usize::try_from(program)
+        .ok()
+        .and_then(|program| PRESETS.get(program))
+        .map(|(name, _)| *name)
+        .unwrap_or("Patch")
+}
+
 /// The patch menu.
 ///
 /// The JUCE editor's patch menu is a combo box with the twenty-eight
-/// factory presets in it, and the import and the export at the top.
+/// factory presets in it, and the import and the export at the top. It
+/// shows the name of the program the editor is on.
 pub(crate) fn preset_menu(ui: &mut Ui, panels: &Panels) {
     // The number of the entry that was picked, if any.
     let mut action: Option<usize> = None;
 
+    // The JUCE editor's patch menu shows the name of the program it is on,
+    // and "Patch" when it is not on one of the factory presets.
+    let program = panels.current_program.load(Ordering::Relaxed);
+
     egui::ComboBox::from_id_salt("presets")
-        .selected_text("Patch")
+        .selected_text(program_name(program))
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut action, Some(0), "Import");
             ui.selectable_value(&mut action, Some(1), "Export");
@@ -242,6 +259,13 @@ pub(crate) fn settings_menu(ui: &mut Ui, panels: &Panels, response: &Response) {
             ui.ctx().request_repaint();
         }
 
+        // The JUCE editor's settings menu carries these three parameters as
+        // well.
+        ui.separator();
+        toggle(ui, panels, "stereoizer", "Stereoizer");
+        toggle(ui, panels, "reuse_voices", "Reuse voices on repeated notes");
+        toggle(ui, panels, "fadeout_repeats", "Fadeout repeated notes");
+
         ui.separator();
         if ui.button("Import patch").clicked() {
             import_patch(panels);
@@ -293,6 +317,11 @@ fn load_preset(panels: &Panels, index: usize) {
     };
     let patch = convert_legacy_patch(&legacy);
     apply_patch(panels, &patch);
+
+    // The patch menu shows the program the editor is on.
+    panels
+        .current_program
+        .store(index as i32, Ordering::Relaxed);
 }
 
 /// Sets every parameter a patch names.
@@ -300,6 +329,10 @@ fn apply_patch(panels: &Panels, patch: &Patch) {
     for (id, value) in &patch.params {
         panels.params.set_legacy(id, *value);
     }
+
+    // The patch knows which program it was on, and the patch menu shows it.
+    let program = patch.current_program.unwrap_or(crate::editor::NO_PROGRAM);
+    panels.current_program.store(program, Ordering::Relaxed);
 }
 
 /// Asks the user for a patch to write.
@@ -363,6 +396,16 @@ fn import_legacy_patch(panels: &Panels) {
 }
 
 /// Asks the user for a mallet sample to load.
+///
+/// The file dialog of `rfd` is modal and blocks the thread of the editor
+/// while it is open, and there is no way of opening it without blocking:
+/// `rfd` has no asynchronous version of its dialogs. The JUCE editor opens
+/// its file chooser asynchronously, so this is the one place where this
+/// build is less responsive than the original.
+///
+/// The decoding of the file does not block: it happens on the plugin's
+/// background thread, and the editor picks the sample up the next time it
+/// draws itself.
 fn import_audio(panels: &Panels) {
     let Some(path) = rfd::FileDialog::new()
         .set_title("Import audio file")
@@ -372,29 +415,23 @@ fn import_audio(panels: &Panels) {
         return;
     };
 
-    // The sample is decoded here, on the thread of the editor, because the
-    // audio thread may not decode anything.
-    let mut sampler = Sampler::new();
-    sampler.load_sample(&path);
-    let waveform = std::mem::take(&mut sampler.waveform);
-    let sample_rate = sampler.wavesrate;
+    // The sample is decoded on a background thread, because the audio
+    // thread may not decode anything and the editor must not freeze while
+    // a large file is decoded.
+    panels.background.request_decode(path);
+}
 
-    // The waveform is handed to the audio thread, which moves it into the
-    // sampler at the beginning of the next block.
-    let mut slot = panels
-        .user_sample
-        .lock()
-        .expect("the sample is not poisoned");
-    *slot = Some(crate::params::UserSample {
-        waveform,
-        sample_rate,
-    });
-    drop(slot);
-
-    // And the mallet becomes the user's file.
-    panels
-        .params
-        .set_legacy("mallet_type", MalletType::UserFile as usize as f64);
+/// A menu entry that turns a boolean parameter on and off.
+///
+/// The entry is ticked when the parameter is on, the way the JUCE editor's
+/// settings menu shows them.
+fn toggle(ui: &mut Ui, panels: &Panels, id: &str, label: &str) {
+    let on = panels.params.plain(id) >= 0.5;
+    if ui.selectable_label(on, label).clicked() {
+        panels.params.begin(id);
+        panels.params.set_plain(id, if on { 0.0 } else { 1.0 });
+        panels.params.end(id);
+    }
 }
 
 /// Sets the scale of the user interface.
@@ -432,6 +469,8 @@ fn set_polyphony(ui: &mut Ui, panels: &Panels, polyphony: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::background::Background;
+    use crate::editor::knob::Binding;
     use crate::editor::panels::Images;
     use crate::editor::settings::Settings;
     use crate::editor::theme::Theme;
@@ -445,7 +484,7 @@ mod tests {
     use rippler_dsp::models::ModalModel;
     use rippler_params::params::RipplerParams;
     use std::collections::{BTreeMap, HashMap};
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
     use std::sync::{Arc, Mutex};
 
     /// A context that records what the editor writes.
@@ -525,8 +564,12 @@ mod tests {
         polyphony: Arc<AtomicUsize>,
         /// The velocity mode.
         velocity: Arc<AtomicBool>,
-        /// A user sample waiting for the audio thread.
-        user_sample: Arc<Mutex<Option<crate::params::UserSample>>>,
+        /// The background work.
+        background: Background,
+        /// The program the patch menu shows.
+        current_program: Arc<AtomicI32>,
+        /// The bindings the editor drew.
+        bindings: Mutex<Vec<Binding>>,
         /// The values that were written.
         written: Arc<Mutex<Vec<(String, f32)>>>,
     }
@@ -547,7 +590,9 @@ mod tests {
                 settings: Arc::new(Mutex::new(Settings::default())),
                 polyphony: Arc::new(AtomicUsize::new(8)),
                 velocity: Arc::new(AtomicBool::new(false)),
-                user_sample: Arc::new(Mutex::new(None)),
+                background: Background::default(),
+                current_program: Arc::new(AtomicI32::new(-1)),
+                bindings: Mutex::new(Vec::new()),
                 written,
             }
         }
@@ -565,7 +610,9 @@ mod tests {
                 settings: &self.settings,
                 polyphony: &self.polyphony,
                 velocity: &self.velocity,
-                user_sample: &self.user_sample,
+                background: &self.background,
+                current_program: &self.current_program,
+                bindings: &self.bindings,
             };
             f(&panels)
         }
@@ -582,6 +629,25 @@ mod tests {
     #[test]
     fn there_are_twenty_eight_presets() {
         assert_eq!(PRESETS.len(), 28);
+    }
+
+    #[test]
+    fn loading_a_preset_remembers_the_program() {
+        let harness = Harness::new();
+
+        harness.with_panels(|panels| load_preset(panels, 3));
+
+        // The patch menu shows the program the editor is on.
+        assert_eq!(harness.current_program.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn the_patch_menu_shows_the_name_of_the_program() {
+        assert_eq!(program_name(0), "Init");
+        assert_eq!(program_name(2), "Harp");
+        // And "Patch" when the editor is not on one of the presets.
+        assert_eq!(program_name(-1), "Patch");
+        assert_eq!(program_name(99), "Patch");
     }
 
     #[test]

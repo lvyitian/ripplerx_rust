@@ -12,6 +12,7 @@
 use egui::{
     Color32, FontId, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, vec2,
 };
+use std::sync::Mutex;
 
 use crate::editor::Params;
 use crate::editor::theme::Theme;
@@ -45,6 +46,37 @@ pub(crate) const START_DEGREES: f32 = -130.0;
 ///
 /// The JUCE build's `Rotary::pixels_per_percent`.
 const PIXELS_PER_PERCENT: f32 = 100.0;
+
+/// The blur radius of the knob's drop shadow.
+///
+/// The JUCE build uses a `DropShadow(15, {4, 4})`.
+const SHADOW_BLUR: f32 = 15.0;
+
+/// The offset of the knob's drop shadow.
+const SHADOW_OFFSET: egui::Vec2 = egui::Vec2::new(4.0, 4.0);
+
+/// The opacity of the middle of the knob's drop shadow.
+///
+/// The JUCE build's shadow is a black or a grey one at full opacity, but
+/// the shadow of a knob that sits on the background is only seen through
+/// its blur, so the middle of it is lighter than the original.
+const SHADOW_OPACITY: f32 = 0.45;
+
+/// What a knob is bound to.
+///
+/// The editor writes down what every knob is bound to, which the tests use
+/// to check that the widgets are bound to the parameters the JUCE editor
+/// binds them to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Binding {
+    /// The parameter the knob edits.
+    pub id: &'static str,
+    /// The parameter the knob edits when the shift key is held, if it has
+    /// one.
+    pub velocity: Option<&'static str>,
+    /// The rectangle the knob was drawn in.
+    pub rect: Rect,
+}
 
 /// The formats a knob's label can have.
 ///
@@ -150,6 +182,62 @@ fn direction(angle: f32) -> egui::Vec2 {
     vec2(angle.sin(), -angle.cos())
 }
 
+/// Draws the drop shadow of a knob.
+///
+/// The JUCE build draws a blurred `DropShadow(15, {4, 4})` under the knob's
+/// circle. egui can only blur a rectangle, so the shadow is drawn as a mesh
+/// of rings whose colour fades out over the blur radius, which reads like
+/// the original.
+fn draw_shadow(painter: &Painter, centre: Pos2, radius: f32, colour: Color32) {
+    /// The number of points around the circle.
+    const SEGMENTS: usize = 32;
+
+    /// The rings of the shadow: the radius and how much of the shadow is
+    /// left at that radius.
+    const RINGS: [(f32, f32); 4] = [(0.0, 1.0), (0.45, 0.45), (0.8, 0.12), (1.0, 0.0)];
+
+    let centre = centre + SHADOW_OFFSET;
+    let shadow = |opacity: f32| {
+        Color32::from_rgba_unmultiplied(
+            colour.r(),
+            colour.g(),
+            colour.b(),
+            (opacity * SHADOW_OPACITY * 255.0) as u8,
+        )
+    };
+
+    let mut mesh = egui::epaint::Mesh::default();
+
+    // The middle of the shadow.
+    let middle = mesh.vertices.len() as u32;
+    mesh.vertices
+        .push(egui::epaint::Vertex::untextured(centre, shadow(1.0)));
+
+    let mut previous = middle;
+    for (distance, opacity) in RINGS {
+        let radius = radius + distance * SHADOW_BLUR;
+        let colour = shadow(opacity);
+        let first = mesh.vertices.len() as u32;
+
+        for segment in 0..SEGMENTS {
+            let angle = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            mesh.vertices.push(egui::epaint::Vertex::untextured(
+                centre + direction(angle) * radius,
+                colour,
+            ));
+        }
+
+        for segment in 0..SEGMENTS {
+            let next = first + (segment as u32 + 1) % SEGMENTS as u32;
+            mesh.add_triangle(previous, first + segment as u32, next);
+        }
+
+        previous = first;
+    }
+
+    painter.add(Shape::mesh(mesh));
+}
+
 /// A rotary knob.
 ///
 /// Port of `Rotary` in `src/ui/Rotary.cpp`.
@@ -173,6 +261,8 @@ pub(crate) struct Knob<'a> {
     velocity_mode: bool,
     /// The colours.
     theme: Theme,
+    /// The log of the bindings, if the editor keeps one.
+    bindings: Option<&'a Mutex<Vec<Binding>>>,
 }
 
 impl<'a> Knob<'a> {
@@ -192,6 +282,7 @@ impl<'a> Knob<'a> {
             symmetric: false,
             velocity_mode: false,
             theme: Theme::LIGHT,
+            bindings: None,
         }
     }
 
@@ -219,6 +310,12 @@ impl<'a> Knob<'a> {
     /// Sets the colours of the knob.
     pub fn with_theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Keeps a record of what the knob is bound to.
+    pub fn with_bindings(mut self, bindings: &'a Mutex<Vec<Binding>>) -> Self {
+        self.bindings = Some(bindings);
         self
     }
 
@@ -273,6 +370,18 @@ impl Knob<'_> {
         let id = ui.make_persistent_id(("knob", self.id));
         let response = ui.interact(circle, id, Sense::click_and_drag());
 
+        // The editor writes down what the knob is bound to, so that the
+        // tests can check it.
+        if let Some(bindings) = self.bindings
+            && let Ok(mut bindings) = bindings.lock()
+        {
+            bindings.push(Binding {
+                id: self.id,
+                velocity: self.velocity_id,
+                rect,
+            });
+        }
+
         let modifiers = ui.input(|input| input.modifiers);
         let shift = modifiers.shift;
         let target = self.target(shift);
@@ -309,9 +418,10 @@ impl Knob<'_> {
             let value = (start + sum).clamp(0.0, 1.0);
 
             // The pitch knobs snap to whole semitones, unless the control key
-            // is held.
+            // is held. The value that is snapped is the value that is being
+            // dragged, not the value the knob had before the drag.
             let value = if self.format == LabelFormat::PitchSemis && !modifiers.ctrl {
-                let whole = self.params.plain(target).round();
+                let whole = self.params.preview_plain(target, value).round();
                 self.params.preview_normalized(target, whole)
             } else {
                 value
@@ -348,17 +458,21 @@ impl Knob<'_> {
             if wheel != 0.0 && !ui.input(|input| input.pointer.any_down()) {
                 let speed = if modifiers.ctrl { 0.01 } else { 0.05 };
                 let mut change = if wheel > 0.0 { speed } else { -speed };
-                let mut value = self.params.normalized(target);
 
                 self.params.begin(target);
+                let value = self.params.normalized(target);
                 self.params
                     .set_normalized(target, (value + change).clamp(0.0, 1.0));
 
+                // The step is added to the value the parameter has, and not
+                // to the value of the step before it, so that the first step
+                // off zero is not lost.
                 let mut steps = 0;
                 while wheel > 0.0 && self.params.normalized(target) == 0.0 && steps < 100 {
                     change += 0.05;
-                    value = (value + change).clamp(0.0, 1.0);
-                    self.params.set_normalized(target, value);
+                    let value = self.params.normalized(target);
+                    self.params
+                        .set_normalized(target, (value + change).clamp(0.0, 1.0));
                     steps += 1;
                 }
 
@@ -390,20 +504,11 @@ impl Knob<'_> {
         // way the JUCE build's circle does.
         let centre = rect.center() + vec2(0.0, -4.0);
 
-        // The drop shadow.
-        let shadow = theme.shadow;
-        for (grow, alpha) in [(1.0f32, 0.10f32), (2.5, 0.07), (4.0, 0.04)] {
-            painter.circle_filled(
-                centre + vec2(4.0, 4.0),
-                RADIUS + grow,
-                Color32::from_rgba_unmultiplied(
-                    shadow.r(),
-                    shadow.g(),
-                    shadow.b(),
-                    (alpha * 255.0) as u8,
-                ),
-            );
-        }
+        // The drop shadow. The JUCE build draws a blurred
+        // `DropShadow(15, {4, 4})`, and egui has no blurred shadow for a
+        // circle, so the shadow is a radial gradient that fades out over
+        // the blur radius.
+        draw_shadow(painter, centre, RADIUS, theme.shadow);
 
         // The knob itself.
         painter.circle_filled(centre, RADIUS, theme.background);
@@ -508,6 +613,204 @@ impl Knob<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::{Parameters, Params};
+    use nice_plug::context::gui::GuiContext;
+    use nice_plug_core::context::PluginApi;
+    use nice_plug_core::context::gui::GuiContextInner;
+    use nice_plug_core::params::Params as ParamsTrait;
+    use nice_plug_core::params::internals::ParamPtr;
+    use nice_plug_core::plugin::PluginState;
+    use rippler_params::params::RipplerParams;
+    use std::collections::BTreeMap;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// A context that records the values the editor writes.
+    struct Mock {
+        /// The identifier of every parameter.
+        ids: HashMap<ParamPtr, String>,
+        /// The values that were written.
+        written: Arc<Mutex<Vec<(String, f32)>>>,
+    }
+
+    impl Mock {
+        /// Builds a context that watches a parameter set.
+        fn new(parameters: &RipplerParams, written: Arc<Mutex<Vec<(String, f32)>>>) -> Self {
+            let ids = parameters
+                .param_map()
+                .into_iter()
+                .map(|(id, pointer, _)| (pointer, id))
+                .collect();
+            Self { ids, written }
+        }
+    }
+
+    impl GuiContextInner for Mock {
+        fn plugin_api(&self) -> PluginApi {
+            PluginApi::Vst3
+        }
+
+        unsafe fn raw_begin_set_parameter(&self, _param: ParamPtr) {}
+
+        unsafe fn raw_set_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+            // SAFETY: the pointer comes from the parameter set of the test,
+            // which is alive for as long as the test runs.
+            unsafe { param._internal_set_normalized_value(normalized) };
+
+            let Some(id) = self.ids.get(&param) else {
+                return;
+            };
+            // SAFETY: see above.
+            let plain = unsafe { param.preview_plain(normalized) };
+            self.written
+                .lock()
+                .expect("the values are not poisoned")
+                .push((id.clone(), plain));
+        }
+
+        unsafe fn raw_end_set_parameter(&self, _param: ParamPtr) {}
+
+        fn get_state(&self) -> PluginState {
+            PluginState {
+                version: String::new(),
+                params: BTreeMap::new(),
+                fields: BTreeMap::new(),
+            }
+        }
+
+        fn set_state(&self, _state: PluginState) {}
+
+        fn request_restart(&self) {}
+    }
+
+    /// The rectangle a knob is drawn in.
+    fn knob_rect() -> Rect {
+        Rect::from_min_size(Pos2::new(100.0, 100.0), vec2(KNOB_WIDTH, KNOB_HEIGHT))
+    }
+
+    /// The middle of a knob's circle.
+    fn knob_centre() -> Pos2 {
+        knob_rect().center() + vec2(0.0, -4.0)
+    }
+
+    /// The input of a frame of the editor.
+    fn input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(650.0, 485.0))),
+            ..Default::default()
+        }
+    }
+
+    /// Draws a knob in a frame.
+    ///
+    /// The textures of the frame are never painted, so their deltas are
+    /// dropped on purpose.
+    fn run_frame(
+        context: &egui::Context,
+        input: egui::RawInput,
+        params: &Params,
+        id: &'static str,
+        format: LabelFormat,
+    ) {
+        let mut output = context.run_ui(input, |ui| {
+            Knob::new(params, id, "Knob", format).ui_at(ui, knob_rect());
+        });
+        output.textures_delta.clear();
+    }
+
+    /// Drags a knob and returns the values that were written.
+    fn drag(
+        id: &'static str,
+        format: LabelFormat,
+        modifiers: egui::Modifiers,
+        distance: f32,
+    ) -> Vec<(String, f32)> {
+        let context = egui::Context::default();
+        let parameters = Box::new(RipplerParams::default());
+        let map = Parameters::new(&parameters);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let gui = GuiContext::new(Arc::new(Mock::new(&parameters, written.clone())));
+        let setter = gui.param_setter();
+        let params = Params::new(&parameters, &map, &setter);
+
+        let centre = knob_centre();
+
+        // The first frame draws the knob, so that the pointer finds it.
+        run_frame(&context, input(), &params, id, format);
+
+        // The second frame presses the mouse on the knob.
+        let mut press = input();
+        press.events.push(egui::Event::ModifiersChanged(modifiers));
+        press.events.push(egui::Event::PointerMoved(centre));
+        press.events.push(egui::Event::PointerButton {
+            pos: centre,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers,
+        });
+        run_frame(&context, press, &params, id, format);
+
+        // The third frame moves the mouse, and the knob follows it.
+        let mut moving = input();
+        moving.events.push(egui::Event::ModifiersChanged(modifiers));
+        moving
+            .events
+            .push(egui::Event::PointerMoved(centre + vec2(distance, 0.0)));
+        run_frame(&context, moving, &params, id, format);
+
+        // And the fourth one lets go of the mouse.
+        let mut release = input();
+        release.events.push(egui::Event::PointerButton {
+            pos: centre + vec2(distance, 0.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers,
+        });
+        run_frame(&context, release, &params, id, format);
+
+        written.lock().expect("the values are not poisoned").clone()
+    }
+
+    /// Scrolls the wheel over a knob and returns the values that were
+    /// written.
+    fn wheel(id: &'static str, format: LabelFormat, initial: Option<f64>) -> Vec<(String, f32)> {
+        let context = egui::Context::default();
+        let parameters = Box::new(RipplerParams::default());
+        let map = Parameters::new(&parameters);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let gui = GuiContext::new(Arc::new(Mock::new(&parameters, written.clone())));
+        let setter = gui.param_setter();
+        let params = Params::new(&parameters, &map, &setter);
+
+        let centre = knob_centre();
+
+        // The parameter starts at the value the test wants it at.
+        if let Some(value) = initial {
+            params.set_plain(id, value);
+            written.lock().expect("the values are not poisoned").clear();
+        }
+
+        // The first frame draws the knob, so that the pointer finds it.
+        run_frame(&context, input(), &params, id, format);
+
+        // The second frame moves the mouse over the knob.
+        let mut hovering = input();
+        hovering.events.push(egui::Event::PointerMoved(centre));
+        run_frame(&context, hovering, &params, id, format);
+
+        // And the third one turns the wheel.
+        let mut turning = input();
+        turning.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::default(),
+        });
+        run_frame(&context, turning, &params, id, format);
+
+        written.lock().expect("the values are not poisoned").clone()
+    }
 
     #[test]
     fn the_arc_sweeps_two_hundred_and_sixty_degrees() {
@@ -549,5 +852,74 @@ mod tests {
         assert_eq!(LabelFormat::AbMix.format(0.0), "100:0");
         assert_eq!(LabelFormat::AbMix.format(0.25), "75:25");
         assert_eq!(LabelFormat::AbMix.format(1.0), "0:100");
+    }
+
+    #[test]
+    fn dragging_a_pitch_control_changes_it() {
+        let written = drag(
+            "mallet_pitch",
+            LabelFormat::PitchSemis,
+            egui::Modifiers::default(),
+            100.0,
+        );
+
+        assert!(!written.is_empty(), "the drag did not write anything");
+        let (id, value) = written.last().expect("the value was written");
+        assert_eq!(id, "mallet_pitch");
+        assert!(*value != 0.0, "the drag did not change the value");
+    }
+
+    #[test]
+    fn a_pitch_control_snaps_to_whole_semitones() {
+        // A drag of a hundred points is a quarter of the knob's range,
+        // which is twelve semitones.
+        let written = drag(
+            "mallet_pitch",
+            LabelFormat::PitchSemis,
+            egui::Modifiers::default(),
+            100.0,
+        );
+
+        let (_, value) = written.last().expect("the value was written");
+        assert_eq!(*value, 12.0);
+    }
+
+    #[test]
+    fn a_pitch_control_does_not_snap_when_the_control_key_is_held() {
+        // The control key makes the knob ten times finer, so the drag is
+        // worth a semitone and a fifth.
+        let written = drag(
+            "mallet_pitch",
+            LabelFormat::PitchSemis,
+            egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+            100.0,
+        );
+
+        let (_, value) = written.last().expect("the value was written");
+        assert!((value - 1.2).abs() < 0.001, "the value is {value}, not 1.2");
+    }
+
+    #[test]
+    fn the_wheel_moves_a_value_that_is_at_zero() {
+        // The JUCE build has a fix for the wheel not working when the value
+        // is zero: the step is added again and again until the value moves.
+        let written = wheel("a_decay", LabelFormat::Seconds2f, Some(0.01));
+
+        let (id, value) = written.last().expect("the wheel wrote something");
+        assert_eq!(id, "a_decay");
+        assert!(*value > 0.01, "the wheel did not move the value");
+    }
+
+    #[test]
+    fn the_wheel_does_not_compound_its_step() {
+        // The step of the wheel is added to the value the parameter has,
+        // and not to the step before it, so the fix walks the steps of five
+        // percent instead of jumping over one of them.
+        let written = wheel("a_decay", LabelFormat::Seconds2f, Some(0.01));
+
+        assert_eq!(written.len(), 3, "the wheel wrote {written:?}");
     }
 }

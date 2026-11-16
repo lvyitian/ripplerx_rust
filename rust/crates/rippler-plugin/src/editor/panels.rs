@@ -14,11 +14,12 @@ use nice_plug_core::params::enums::Enum;
 use rippler_dsp::mallet::MalletType;
 use rippler_dsp::models::ModalModel;
 use rippler_params::enums::{Coupling, NoiseFilterMode, PartialCount};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::background::Background;
 use crate::editor::Params;
-use crate::editor::knob::{KNOB_HEIGHT, KNOB_WIDTH, Knob, LabelFormat};
+use crate::editor::knob::{Binding, KNOB_HEIGHT, KNOB_WIDTH, Knob, LabelFormat};
 use crate::editor::meter::Meter;
 use crate::editor::pitch::Pitch;
 use crate::editor::settings::Settings;
@@ -52,10 +53,16 @@ static OFF_DARK: &[u8] = include_bytes!("../../../../../resources/off_dark.png")
 /// The order the models are shown in.
 ///
 /// The JUCE build shows them in this order, which is not the order the
-/// parameter holds them in.
+/// parameter holds them in. Every entry is the value the parameter holds
+/// for the model that is shown in that place.
 const MODEL_ORDER: [usize; 12] = [0, 1, 2, 10, 3, 4, 5, 11, 6, 9, 7, 8];
 
 /// The order the partial counts are shown in.
+///
+/// The JUCE build shows them in the sorted order, which is not the order the
+/// parameter holds them in: the legacy state stores the index of the
+/// choice, so "1" is the sixth choice and not the first one. Every entry is
+/// the value the parameter holds for the count that is shown in that place.
 const PARTIALS_ORDER: [usize; 7] = [5, 6, 0, 1, 2, 3, 4];
 
 /// The images of the editor.
@@ -128,8 +135,12 @@ pub(crate) struct Panels<'a> {
     pub polyphony: &'a Arc<AtomicUsize>,
     /// Whether the velocity edit mode is on.
     pub velocity: &'a Arc<AtomicBool>,
-    /// A user sample that the editor decoded, waiting for the audio thread.
-    pub user_sample: &'a Arc<Mutex<Option<crate::params::UserSample>>>,
+    /// The work the editor hands to the background thread.
+    pub background: &'a Background,
+    /// The program the patch menu shows.
+    pub current_program: &'a Arc<AtomicI32>,
+    /// The bindings the editor drew.
+    pub bindings: &'a Mutex<Vec<Binding>>,
 }
 
 impl<'a> Panels<'a> {
@@ -138,6 +149,7 @@ impl<'a> Panels<'a> {
         Knob::new(self.params, id, name, format)
             .with_theme(self.theme)
             .with_velocity_mode(self.velocity_mode)
+            .with_bindings(self.bindings)
     }
 
     /// A tension control bound to a parameter.
@@ -170,11 +182,16 @@ fn section_label(ui: &mut Ui, theme: &Theme, text: &str) {
 /// How a combo box is drawn.
 struct ComboStyle<'a> {
     /// The choices.
-    choices: &'a [&'a str],
-    /// The order of the choices.
     ///
-    /// An empty order means that the choices are shown in the order the
-    /// parameter holds them in.
+    /// The choices are indexed by the value the parameter holds, so the
+    /// choice at the index `n` is the one the parameter holds the value
+    /// `n` for.
+    choices: &'a [&'a str],
+    /// The order the choices are shown in.
+    ///
+    /// Every entry is the value the parameter holds for the choice that is
+    /// shown in that place. An empty order means that the choices are shown
+    /// in the order the parameter holds them in.
     order: &'a [usize],
     /// Whether the combo is filled with the active colour.
     filled: bool,
@@ -184,10 +201,28 @@ struct ComboStyle<'a> {
     width: f32,
 }
 
+/// The entries of a combo box, in the order they are shown in.
+///
+/// Every entry is the value the parameter holds and the text that is shown
+/// for it. The two are the same thing, so that the entry that is shown and
+/// the value that is written can never disagree.
+fn entries<'a>(choices: &'a [&'a str], order: &[usize]) -> Vec<(usize, &'a str)> {
+    if order.is_empty() {
+        return (0..choices.len())
+            .map(|value| (value, choices[value]))
+            .collect();
+    }
+    order
+        .iter()
+        .map(|value| (*value, choices[*value]))
+        .collect()
+}
+
 /// Draws a combo box bound to a choice parameter.
 ///
-/// The `order` says which value of the parameter every entry stands for, so
-/// that the entries can be shown in the order the JUCE build shows them in.
+/// The `order` says in which order the choices are shown, and every entry of
+/// it is the value the parameter holds for that choice: picking the third
+/// entry of the model menu writes the model the third entry stands for.
 fn combo(ui: &mut Ui, params: &Params, id: &str, style: ComboStyle) -> Response {
     let ComboStyle {
         choices,
@@ -197,19 +232,16 @@ fn combo(ui: &mut Ui, params: &Params, id: &str, style: ComboStyle) -> Response 
         width,
     } = style;
 
-    // An empty order means that the choices are shown in the order the
-    // parameter holds them in.
-    let order: Vec<usize> = if order.is_empty() {
-        (0..choices.len()).collect()
-    } else {
-        order.to_vec()
-    };
+    let entries = entries(choices, order);
 
+    // The value of the parameter is the value of the choice, and it is what
+    // is written when another choice is picked.
     let current = params.plain(id).round() as usize;
-    let mut selected = order
-        .iter()
-        .position(|index| *index == current)
-        .unwrap_or(0);
+    let mut selected = if entries.iter().any(|(value, _)| *value == current) {
+        current
+    } else {
+        entries.first().map(|(value, _)| *value).unwrap_or(0)
+    };
 
     let (background, foreground) = if filled {
         (theme.active, theme.on_active())
@@ -231,24 +263,38 @@ fn combo(ui: &mut Ui, params: &Params, id: &str, style: ComboStyle) -> Response 
         visuals.widgets.open.fg_stroke.color = foreground;
     }
 
+    let selected_text = entries
+        .iter()
+        .find(|(value, _)| *value == selected)
+        .map(|(_, text)| *text)
+        .unwrap_or("");
+
     let response = egui::ComboBox::from_id_salt(id)
         .width(width)
-        .selected_text(choices[selected])
+        .selected_text(selected_text)
         .show_ui(ui, |ui| {
-            for (position, choice) in choices.iter().enumerate() {
-                ui.selectable_value(&mut selected, position, *choice);
+            for (value, text) in &entries {
+                ui.selectable_value(&mut selected, *value, *text);
             }
         });
 
     *ui.visuals_mut() = visuals;
 
     if response.response.changed() {
-        params.begin(id);
-        params.set_plain(id, order[selected] as f64);
-        params.end(id);
+        choose(params, id, selected);
     }
 
     response.response
+}
+
+/// Writes the value a choice of a combo box stands for.
+///
+/// The value is the one the parameter holds, so what the combo box shows
+/// and what it writes are the same thing.
+fn choose(params: &Params, id: &str, value: usize) {
+    params.begin(id);
+    params.set_plain(id, value as f64);
+    params.end(id);
 }
 
 /// A slider bound to a parameter.
@@ -412,14 +458,22 @@ pub(crate) fn noise_section(ui: &mut Ui, panels: &Panels) {
                     .knob("noise_mix", "Mix", LabelFormat::Percent)
                     .with_velocity("vel_noise_mix"),
             );
-            ui.add(panels.knob("noise_filter_freq", "Freq", LabelFormat::Hz));
+            ui.add(
+                panels
+                    .knob("noise_filter_freq", "Freq", LabelFormat::Hz)
+                    .with_velocity("vel_noise_freq"),
+            );
             ui.end_row();
             ui.add(
                 panels
                     .knob("noise_res", "Res", LabelFormat::Percent)
                     .with_velocity("vel_noise_res"),
             );
-            ui.add(panels.knob("noise_filter_q", "Q", LabelFormat::Float1));
+            ui.add(
+                panels
+                    .knob("noise_filter_q", "Q", LabelFormat::Float1)
+                    .with_velocity("vel_noise_q"),
+            );
             ui.end_row();
         });
 
@@ -736,12 +790,15 @@ pub(crate) fn resonator_section(ui: &mut Ui, panels: &Panels, ids: &ResonatorIds
                         .with_theme(theme),
                 );
             }
-            ui.add(
-                panels
-                    .knob(ids.hit, "Hit", LabelFormat::Percent)
-                    .with_velocity(ids.velocity_hit)
-                    .with_theme(theme),
-            );
+            // A tube is not hit at a place, so the hit knob is hidden.
+            if !tube {
+                ui.add(
+                    panels
+                        .knob(ids.hit, "Hit", LabelFormat::Percent)
+                        .with_velocity(ids.velocity_hit)
+                        .with_theme(theme),
+                );
+            }
             ui.add(
                 panels
                     .knob(ids.release, "Release", LabelFormat::Percent)
@@ -985,18 +1042,160 @@ fn gear_button(ui: &mut Ui, panels: &Panels) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::background::Background;
     use crate::editor::Parameters;
+    use nice_plug::context::gui::GuiContext;
     use nice_plug_core::context::PluginApi;
     use nice_plug_core::context::gui::GuiContextInner;
+    use nice_plug_core::params::Params as ParamsTrait;
     use nice_plug_core::params::internals::ParamPtr;
     use nice_plug_core::plugin::PluginState;
     use rippler_params::params::RipplerParams;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-    /// A context that does nothing.
+    /// The models of the choice list of `src/PluginProcessor.cpp`.
+    const JUCE_MODELS: [&str; 12] = [
+        "String",
+        "Beam",
+        "Squared",
+        "Membrane",
+        "Plate",
+        "Drumhead",
+        "Marimba",
+        "Open Tube",
+        "Closed Tube",
+        "Marimba2",
+        "Bell",
+        "Djembe",
+    ];
+
+    /// The partial counts of the choice list of `src/PluginProcessor.cpp`.
+    const JUCE_PARTIALS: [&str; 7] = ["4", "8", "16", "32", "64", "1", "2"];
+
+    /// The order the JUCE editor shows the models in, `showModelMenu`.
     ///
-    /// The editor can be drawn without a host, which is what the tests do.
-    struct Mock;
+    /// The menu spells the tube models without a space, and the choice list
+    /// of `src/PluginProcessor.cpp` spells them with one.
+    const JUCE_MODEL_MENU: [&str; 12] = [
+        "String",
+        "Beam",
+        "Squared",
+        "Bell",
+        "Membrane",
+        "Plate",
+        "Drumhead",
+        "Djembe",
+        "Marimba",
+        "Marimba2",
+        "OpenTube",
+        "ClosedTube",
+    ];
+
+    /// The order the JUCE editor shows the partial counts in,
+    /// `showPartialsMenu`.
+    const JUCE_PARTIALS_MENU: [&str; 7] = ["1", "2", "4", "8", "16", "32", "64"];
+
+    /// The knobs of the JUCE editor that have a velocity parameter, and the
+    /// parameter they have.
+    const JUCE_VELOCITY: [(&str, &str); 21] = [
+        ("noise_mix", "vel_noise_mix"),
+        ("noise_res", "vel_noise_res"),
+        ("noise_filter_freq", "vel_noise_freq"),
+        ("noise_filter_q", "vel_noise_q"),
+        ("noise_att", "vel_noise_att"),
+        ("noise_dec", "vel_noise_dec"),
+        ("noise_sus", "vel_noise_sus"),
+        ("noise_rel", "vel_noise_rel"),
+        ("mallet_mix", "vel_mallet_mix"),
+        ("mallet_res", "vel_mallet_res"),
+        ("mallet_stiff", "vel_mallet_stiff"),
+        ("a_decay", "vel_a_decay"),
+        ("a_damp", "vel_a_damp"),
+        ("a_hit", "vel_a_hit"),
+        ("a_inharm", "vel_a_inharm"),
+        ("a_tone", "vel_a_tone"),
+        ("b_decay", "vel_b_decay"),
+        ("b_damp", "vel_b_damp"),
+        ("b_hit", "vel_b_hit"),
+        ("b_inharm", "vel_b_inharm"),
+        ("b_tone", "vel_b_tone"),
+    ];
+
+    /// Every parameter the editor binds a knob to.
+    const BOUND: [&str; 27] = [
+        "noise_mix",
+        "noise_filter_freq",
+        "noise_res",
+        "noise_filter_q",
+        "noise_att",
+        "noise_dec",
+        "noise_sus",
+        "noise_rel",
+        "mallet_mix",
+        "mallet_res",
+        "mallet_stiff",
+        "a_decay",
+        "a_damp",
+        "a_hit",
+        "a_rel",
+        "a_tone",
+        "a_inharm",
+        "a_cut",
+        "b_decay",
+        "b_damp",
+        "b_hit",
+        "b_rel",
+        "b_tone",
+        "b_inharm",
+        "b_cut",
+        "ab_mix",
+        "gain",
+    ];
+
+    /// The value of a model of the JUCE editor's menu.
+    ///
+    /// The menu spells the tube models without a space and the choice list
+    /// spells them with one.
+    fn model_value(name: &str) -> usize {
+        let name = name
+            .replace("OpenTube", "Open Tube")
+            .replace("ClosedTube", "Closed Tube");
+        JUCE_MODELS
+            .iter()
+            .position(|model| *model == name)
+            .expect("the model is in the choice list")
+    }
+
+    /// The value of a partial count of the JUCE editor's menu.
+    ///
+    /// The legacy state holds the index of the choice, so the value of a
+    /// count is where it is in the choice list.
+    fn partial_value(name: &str) -> usize {
+        JUCE_PARTIALS
+            .iter()
+            .position(|count| *count == name)
+            .expect("the count is in the choice list")
+    }
+
+    /// A context that records what the editor writes.
+    struct Mock {
+        /// The identifier of every parameter.
+        ids: HashMap<ParamPtr, String>,
+        /// The values that were written.
+        written: Arc<Mutex<Vec<(String, f32)>>>,
+    }
+
+    impl Mock {
+        /// Builds a context that watches a parameter set.
+        fn new(parameters: &RipplerParams, written: Arc<Mutex<Vec<(String, f32)>>>) -> Self {
+            let ids = parameters
+                .param_map()
+                .into_iter()
+                .map(|(id, pointer, _)| (pointer, id))
+                .collect();
+            Self { ids, written }
+        }
+    }
 
     impl GuiContextInner for Mock {
         fn plugin_api(&self) -> PluginApi {
@@ -1005,7 +1204,21 @@ mod tests {
 
         unsafe fn raw_begin_set_parameter(&self, _param: ParamPtr) {}
 
-        unsafe fn raw_set_parameter_normalized(&self, _param: ParamPtr, _value: f32) {}
+        unsafe fn raw_set_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+            // SAFETY: the pointer comes from the parameter set of the test,
+            // which is alive for as long as the test runs.
+            unsafe { param._internal_set_normalized_value(normalized) };
+
+            let Some(id) = self.ids.get(&param) else {
+                return;
+            };
+            // SAFETY: see above.
+            let plain = unsafe { param.preview_plain(normalized) };
+            self.written
+                .lock()
+                .expect("the values are not poisoned")
+                .push((id.clone(), plain));
+        }
 
         unsafe fn raw_end_set_parameter(&self, _param: ParamPtr) {}
 
@@ -1022,54 +1235,153 @@ mod tests {
         fn request_restart(&self) {}
     }
 
-    /// Draws a part of the editor and counts the knobs it drew.
+    /// The state of an editor that a test can draw.
+    struct Harness {
+        /// The context the editor draws itself in.
+        context: egui::Context,
+        /// The parameters.
+        ///
+        /// The parameters are boxed, because the context watches the
+        /// addresses of the parameters and a move would change them.
+        parameters: Box<RipplerParams>,
+        /// The parameters, by their identifier.
+        map: Parameters,
+        /// The context the plugin hands to the editor.
+        gui: GuiContext,
+        /// The images.
+        images: Images,
+        /// The settings.
+        settings: Arc<Mutex<Settings>>,
+        /// The number of voices.
+        polyphony: Arc<AtomicUsize>,
+        /// The velocity mode.
+        velocity: Arc<AtomicBool>,
+        /// The background work.
+        background: Background,
+        /// The program the patch menu shows.
+        current_program: Arc<AtomicI32>,
+        /// The bindings the editor drew.
+        bindings: Mutex<Vec<Binding>>,
+        /// The values that were written.
+        written: Arc<Mutex<Vec<(String, f32)>>>,
+    }
+
+    impl Harness {
+        /// Builds the state of an editor.
+        fn new() -> Self {
+            let context = egui::Context::default();
+            let parameters = Box::new(RipplerParams::default());
+            let map = Parameters::new(&parameters);
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let gui = GuiContext::new(Arc::new(Mock::new(&parameters, written.clone())));
+            let images = Images::load(&context);
+            Self {
+                context,
+                parameters,
+                map,
+                gui,
+                images,
+                settings: Arc::new(Mutex::new(Settings::default())),
+                polyphony: Arc::new(AtomicUsize::new(8)),
+                velocity: Arc::new(AtomicBool::new(false)),
+                background: Background::default(),
+                current_program: Arc::new(AtomicI32::new(-1)),
+                bindings: Mutex::new(Vec::new()),
+                written,
+            }
+        }
+
+        /// Runs something with the panels of the editor.
+        fn with_panels<R>(&self, f: impl FnOnce(&Panels) -> R) -> R {
+            let setter = self.gui.param_setter();
+            let params = Params::new(&self.parameters, &self.map, &setter);
+            let panels = Panels {
+                params: &params,
+                theme: Theme::LIGHT,
+                velocity_mode: false,
+                images: &self.images,
+                meter: 0.0,
+                settings: &self.settings,
+                polyphony: &self.polyphony,
+                velocity: &self.velocity,
+                background: &self.background,
+                current_program: &self.current_program,
+                bindings: &self.bindings,
+            };
+            f(&panels)
+        }
+
+        /// Draws something in the editor and returns what it drew.
+        fn draw(&self, mut draw: impl FnMut(&mut Ui, &Panels)) -> egui::FullOutput {
+            self.bindings
+                .lock()
+                .expect("the bindings are not poisoned")
+                .clear();
+
+            let output = self.context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        vec2(650.0, 485.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        self.with_panels(|panels| draw(ui, panels));
+                    });
+                },
+            );
+
+            // The textures are never painted, so the deltas are dropped on
+            // purpose.
+            let mut output = output;
+            output.textures_delta.clear();
+            output
+        }
+
+        /// Draws the whole editor.
+        fn draw_editor(&self) -> egui::FullOutput {
+            self.draw(|ui, panels| {
+                top_bar(ui, panels);
+
+                // Every section is a column of its own, the way the sections
+                // of the JUCE editor are.
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.vertical(|ui| noise_section(ui, panels));
+                    ui.vertical(|ui| mallet_section(ui, panels));
+                    ui.vertical(|ui| {
+                        resonator_section(ui, panels, &resonator_a());
+                        resonator_section(ui, panels, &resonator_b());
+                    });
+                    ui.vertical(|ui| coupling_section(ui, panels));
+                });
+            })
+        }
+
+        /// The bindings the editor made.
+        fn bindings(&self) -> Vec<Binding> {
+            self.bindings
+                .lock()
+                .expect("the bindings are not poisoned")
+                .clone()
+        }
+
+        /// The values that were written, by the identifier of the parameter.
+        fn written(&self) -> Vec<(String, f32)> {
+            self.written
+                .lock()
+                .expect("the values are not poisoned")
+                .clone()
+        }
+    }
+
+    /// Counts the knobs a drawing made.
     ///
     /// Every knob draws a circle of the knob's radius, so the circles of
     /// that radius are the knobs.
-    fn knobs(mut draw: impl FnMut(&mut Ui, &Panels)) -> usize {
-        let context = egui::Context::default();
-        let gui = nice_plug::context::gui::GuiContext::new(Arc::new(Mock));
-        let setter = gui.param_setter();
-        let parameters = RipplerParams::default();
-        let map = Parameters::new(&parameters);
-        let images = Images::load(&context);
-        let settings = Arc::new(Mutex::new(Settings::default()));
-        let polyphony = Arc::new(AtomicUsize::new(8));
-        let velocity = Arc::new(AtomicBool::new(false));
-        let user_sample = Arc::new(Mutex::new(None));
-
-        let output = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    vec2(650.0, 485.0),
-                )),
-                ..Default::default()
-            },
-            |ui| {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    let params = Params::new(&parameters, &map, &setter);
-                    let panels = Panels {
-                        params: &params,
-                        theme: Theme::LIGHT,
-                        velocity_mode: false,
-                        images: &images,
-                        meter: 0.0,
-                        settings: &settings,
-                        polyphony: &polyphony,
-                        velocity: &velocity,
-                        user_sample: &user_sample,
-                    };
-                    draw(ui, &panels);
-                });
-            },
-        );
-
-        // The textures are never painted, so the deltas are dropped on
-        // purpose.
-        let mut output = output;
-        output.textures_delta.clear();
-
+    fn knobs(output: &egui::FullOutput) -> usize {
         output
             .shapes
             .iter()
@@ -1081,96 +1393,237 @@ mod tests {
 
     #[test]
     fn the_noise_section_has_eight_knobs() {
-        assert_eq!(
-            knobs(|ui, panels| {
-                noise_section(ui, panels);
-            }),
-            8
-        );
+        let harness = Harness::new();
+        let output = harness.draw(|ui, panels| {
+            noise_section(ui, panels);
+        });
+        assert_eq!(knobs(&output), 8);
     }
 
     #[test]
     fn the_mallet_section_has_three_knobs() {
-        assert_eq!(
-            knobs(|ui, panels| {
-                mallet_section(ui, panels);
-            }),
-            3
-        );
+        let harness = Harness::new();
+        let output = harness.draw(|ui, panels| {
+            mallet_section(ui, panels);
+        });
+        assert_eq!(knobs(&output), 3);
     }
 
     #[test]
     fn a_resonator_section_has_seven_knobs() {
-        assert_eq!(
-            knobs(|ui, panels| {
-                resonator_section(ui, panels, &resonator_a());
-            }),
-            7
-        );
+        let harness = Harness::new();
+        let output = harness.draw(|ui, panels| {
+            resonator_section(ui, panels, &resonator_a());
+        });
+        assert_eq!(knobs(&output), 7);
     }
 
     #[test]
     fn the_coupling_section_has_two_knobs() {
-        assert_eq!(
-            knobs(|ui, panels| {
-                coupling_section(ui, panels);
-            }),
-            2
-        );
+        let harness = Harness::new();
+        let output = harness.draw(|ui, panels| {
+            coupling_section(ui, panels);
+        });
+        assert_eq!(knobs(&output), 2);
+    }
+
+    #[test]
+    fn a_tube_resonator_hides_the_hit_knob() {
+        let harness = Harness::new();
+        harness.with_panels(|panels| {
+            panels
+                .params
+                .set_plain("a_model", ModalModel::OpenTube as usize as f64);
+        });
+
+        let output = harness.draw(|ui, panels| {
+            resonator_section(ui, panels, &resonator_a());
+        });
+
+        // The decay, the radius and the release are left.
+        assert_eq!(knobs(&output), 3);
+        let bindings = harness.bindings();
+        assert!(bindings.iter().all(|binding| binding.id != "a_hit"));
+        assert!(bindings.iter().any(|binding| binding.id == "a_radius"));
+    }
+
+    #[test]
+    fn the_model_combo_shows_the_models_in_the_order_of_the_juce_build() {
+        let shown = entries(ModalModel::variants(), &MODEL_ORDER);
+        assert_eq!(shown.len(), JUCE_MODELS.len());
+
+        for (position, (value, text)) in shown.iter().enumerate() {
+            // The text that is shown is the one of the choice list of
+            // `src/PluginProcessor.cpp`.
+            assert_eq!(*text, JUCE_MODELS[*value]);
+            // And the order is the one of the JUCE editor's model menu.
+            assert_eq!(*value, model_value(JUCE_MODEL_MENU[position]));
+        }
+    }
+
+    #[test]
+    fn the_partials_combo_shows_the_counts_in_the_order_of_the_juce_build() {
+        let shown = entries(PartialCount::variants(), &PARTIALS_ORDER);
+        assert_eq!(shown.len(), JUCE_PARTIALS.len());
+
+        for (position, (value, text)) in shown.iter().enumerate() {
+            // The text that is shown is the one of the choice list of
+            // `src/PluginProcessor.cpp`.
+            assert_eq!(*text, JUCE_PARTIALS[*value]);
+            // And the order is the one of the JUCE editor's partials menu,
+            // which is the sorted one and not the legacy one.
+            assert_eq!(*value, partial_value(JUCE_PARTIALS_MENU[position]));
+        }
+    }
+
+    #[test]
+    fn the_model_combo_writes_the_value_of_the_choice_it_shows() {
+        let harness = Harness::new();
+
+        for (value, _) in entries(ModalModel::variants(), &MODEL_ORDER) {
+            harness.with_panels(|panels| choose(panels.params, "a_model", value));
+
+            let written = harness.written();
+            let (id, written_value) = written.last().expect("the value was written");
+            assert_eq!(id, "a_model");
+            assert_eq!(*written_value, value as f32);
+        }
+    }
+
+    #[test]
+    fn the_partials_combo_writes_the_value_of_the_choice_it_shows() {
+        let harness = Harness::new();
+
+        for (value, _) in entries(PartialCount::variants(), &PARTIALS_ORDER) {
+            harness.with_panels(|panels| choose(panels.params, "a_partials", value));
+
+            let written = harness.written();
+            let (id, written_value) = written.last().expect("the value was written");
+            assert_eq!(id, "a_partials");
+            assert_eq!(*written_value, value as f32);
+        }
+    }
+
+    #[test]
+    fn every_knob_with_a_velocity_parameter_in_the_juce_editor_has_one() {
+        let harness = Harness::new();
+        harness.draw_editor();
+        let bindings = harness.bindings();
+
+        for (id, velocity) in JUCE_VELOCITY {
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.id == id)
+                .unwrap_or_else(|| panic!("the editor has no knob for {id}"));
+            assert_eq!(
+                binding.velocity,
+                Some(velocity),
+                "{id} has the wrong velocity parameter"
+            );
+        }
+    }
+
+    #[test]
+    fn the_editor_binds_the_knobs_of_the_juce_editor() {
+        let harness = Harness::new();
+        harness.draw_editor();
+        let bindings = harness.bindings();
+
+        let mut bound: Vec<&str> = bindings.iter().map(|binding| binding.id).collect();
+        bound.sort_unstable();
+        bound.dedup();
+
+        let mut expected: Vec<&str> = BOUND.to_vec();
+        expected.sort_unstable();
+
+        assert_eq!(bound, expected);
+    }
+
+    #[test]
+    fn the_noise_knobs_are_where_the_juce_editor_puts_them() {
+        let harness = Harness::new();
+        harness.draw(|ui, panels| {
+            noise_section(ui, panels);
+        });
+        let bindings = harness.bindings();
+
+        let rect = |id: &str| {
+            bindings
+                .iter()
+                .find(|binding| binding.id == id)
+                .unwrap_or_else(|| panic!("the editor has no knob for {id}"))
+                .rect
+        };
+
+        // The JUCE editor has the mix above the resonance and the frequency
+        // above the quality factor.
+        let mix = rect("noise_mix");
+        let resonance = rect("noise_res");
+        let frequency = rect("noise_filter_freq");
+        let quality = rect("noise_filter_q");
+
+        assert!((mix.left() - resonance.left()).abs() < 0.01);
+        assert!((frequency.left() - quality.left()).abs() < 0.01);
+        assert!((mix.top() - frequency.top()).abs() < 0.01);
+        assert!((resonance.top() - quality.top()).abs() < 0.01);
+        assert!((mix.bottom() - resonance.top()).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_envelope_knobs_are_where_the_juce_editor_puts_them() {
+        let harness = Harness::new();
+        harness.draw(|ui, panels| {
+            noise_section(ui, panels);
+        });
+        let bindings = harness.bindings();
+
+        let rect = |id: &str| {
+            bindings
+                .iter()
+                .find(|binding| binding.id == id)
+                .unwrap_or_else(|| panic!("the editor has no knob for {id}"))
+                .rect
+        };
+
+        // The JUCE editor has the attack above the sustain and the decay
+        // above the release.
+        let attack = rect("noise_att");
+        let sustain = rect("noise_sus");
+        let decay = rect("noise_dec");
+        let release = rect("noise_rel");
+
+        assert!((attack.left() - sustain.left()).abs() < 0.01);
+        assert!((decay.left() - release.left()).abs() < 0.01);
+        assert!((attack.top() - decay.top()).abs() < 0.01);
+        assert!((sustain.top() - release.top()).abs() < 0.01);
+        assert!((attack.bottom() - sustain.top()).abs() < 0.01);
+    }
+
+    #[test]
+    fn every_identifier_the_editor_uses_is_a_parameter() {
+        let harness = Harness::new();
+        harness.draw_editor();
+
+        let known: BTreeSet<String> = RipplerParams::default()
+            .param_map()
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+
+        let used = harness.map.used_ids();
+        assert!(!used.is_empty(), "the editor asked for nothing");
+        for id in &used {
+            assert!(
+                known.contains(id),
+                "the editor asks for {id}, which is not a parameter"
+            );
+        }
     }
 
     /// Draws the whole editor and returns the rectangle its content is in.
     fn content_bounds() -> egui::Rect {
-        let context = egui::Context::default();
-        let gui = nice_plug::context::gui::GuiContext::new(Arc::new(Mock));
-        let setter = gui.param_setter();
-        let parameters = RipplerParams::default();
-        let map = Parameters::new(&parameters);
-        let images = Images::load(&context);
-        let settings = Arc::new(Mutex::new(Settings::default()));
-        let polyphony = Arc::new(AtomicUsize::new(8));
-        let velocity = Arc::new(AtomicBool::new(false));
-        let user_sample = Arc::new(Mutex::new(None));
-
-        let mut output = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    vec2(650.0, 485.0),
-                )),
-                ..Default::default()
-            },
-            |ui| {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    let params = Params::new(&parameters, &map, &setter);
-                    let panels = Panels {
-                        params: &params,
-                        theme: Theme::LIGHT,
-                        velocity_mode: false,
-                        images: &images,
-                        meter: 0.0,
-                        settings: &settings,
-                        polyphony: &polyphony,
-                        velocity: &velocity,
-                        user_sample: &user_sample,
-                    };
-                    top_bar(ui, &panels);
-                    ui.horizontal_top(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.vertical(|ui| noise_section(ui, &panels));
-                        ui.vertical(|ui| mallet_section(ui, &panels));
-                        ui.vertical(|ui| {
-                            resonator_section(ui, &panels, &resonator_a());
-                            resonator_section(ui, &panels, &resonator_b());
-                        });
-                        ui.vertical(|ui| coupling_section(ui, &panels));
-                    });
-                });
-            },
-        );
-        // The textures are never painted, so the deltas are dropped on
-        // purpose.
-        output.textures_delta.clear();
+        let harness = Harness::new();
+        let output = harness.draw_editor();
 
         fn bounds_of(points: &[egui::Pos2]) -> egui::Rect {
             let mut min = points[0];
@@ -1193,6 +1646,7 @@ mod tests {
                 egui::Shape::LineSegment { points, .. } => bounds_of(points),
                 egui::Shape::Path(path) => bounds_of(&path.points),
                 egui::Shape::Text(text) => text.galley.rect,
+                egui::Shape::Mesh(mesh) => mesh.calc_bounds(),
                 _ => continue,
             };
             bounds = Some(match bounds {
@@ -1215,13 +1669,7 @@ mod tests {
 
     #[test]
     fn the_whole_editor_lays_out_without_panicking() {
-        knobs(|ui, panels| {
-            top_bar(ui, panels);
-            noise_section(ui, panels);
-            mallet_section(ui, panels);
-            resonator_section(ui, panels, &resonator_a());
-            resonator_section(ui, panels, &resonator_b());
-            coupling_section(ui, panels);
-        });
+        let harness = Harness::new();
+        harness.draw_editor();
     }
 }

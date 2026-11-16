@@ -4,6 +4,7 @@
 //! parameters, and drives the per-sample loop that `src/PluginProcessor.cpp`
 //! runs.
 
+pub mod background;
 pub mod block_params;
 pub mod editor;
 pub mod identity;
@@ -30,6 +31,7 @@ use rippler_params::params::RipplerParams;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
+use crate::background::{Background, BackgroundTask};
 use crate::editor::{EDITOR_SIZE, EditorState, RipplerEditor};
 use crate::params::{
     MALLET_TYPE_COUNT, ParamState, PreparedSample, UserSample, prepare_internal_samples,
@@ -117,6 +119,8 @@ pub struct RipplerX {
     meter: Arc<AtomicF32>,
     /// A user sample that the editor decoded, waiting for the audio thread.
     user_sample: Arc<Mutex<Option<UserSample>>>,
+    /// The work the editor hands to the background thread.
+    background: Background,
 }
 
 impl Default for RipplerX {
@@ -138,6 +142,7 @@ impl Default for RipplerX {
         ));
         let meter = Arc::new(AtomicF32::new(0.0));
         let user_sample = Arc::new(Mutex::new(None));
+        let background = Background::default();
 
         // The editor opens at the scale the user chose last.
         let ui_scale = settings
@@ -152,6 +157,7 @@ impl Default for RipplerX {
             polyphony.clone(),
             meter.clone(),
             user_sample.clone(),
+            background.clone(),
         ));
 
         Self {
@@ -182,6 +188,7 @@ impl Default for RipplerX {
             editor: Some(editor),
             meter,
             user_sample,
+            background,
         }
     }
 }
@@ -218,7 +225,7 @@ impl Plugin for RipplerX {
     /// The editor is the egui editor of the `editor` module.
     type Editor = EguiEditor<RipplerEditor>;
     type SysExMessage = ();
-    type BackgroundTask = ();
+    type BackgroundTask = BackgroundTask;
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
@@ -229,13 +236,54 @@ impl Plugin for RipplerX {
     /// The editor is built once, when the plugin is built, and is handed over
     /// here. The host may open and close the editor window several times,
     /// and the editor keeps its state between them.
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
+    fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
+        // The editor asks the plugin for background work through the
+        // executor, so it is handed over here.
+        self.background.set_executor(async_executor);
+
         nice_plug_egui::create_egui_editor(
             self.editor_state.clone(),
             self.repaint_notifier.clone(),
             EguiNiceSettings::new().with_tile("RipplerX"),
             self.editor.take()?,
         )
+    }
+
+    /// Runs the plugin's background tasks.
+    ///
+    /// The tasks are run on a background thread, except for the ones that
+    /// the editor brings back to the GUI thread.
+    fn task_executor(&mut self) -> TaskExecutor<Self> {
+        let background = self.background.clone();
+        let repaint = self.repaint_notifier.clone();
+
+        Box::new(move |task| match task {
+            BackgroundTask::DecodeSample => {
+                // This runs on a background thread, so that the editor does
+                // not freeze while a large file is decoded.
+                let Some(path) = background.take_pending() else {
+                    return;
+                };
+
+                let mut sampler = Sampler::new();
+                sampler.load_sample(&path);
+                let waveform = std::mem::take(&mut sampler.waveform);
+                let sample_rate = sampler.wavesrate;
+                background.put_decoded(UserSample {
+                    waveform,
+                    sample_rate,
+                });
+
+                // And the editor is told about it on the GUI thread, so that
+                // it picks the sample up.
+                background.notify_decoded();
+            }
+            BackgroundTask::SampleDecoded => {
+                // This runs on the GUI thread: the editor draws itself
+                // again and picks the sample up.
+                repaint.request_repaint();
+            }
+        })
     }
 
     fn activate(

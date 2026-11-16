@@ -22,10 +22,13 @@
 //!   resonators — are the PNG files of the `resources` folder, embedded in
 //!   the plugin with `include_bytes!` and decoded with the `image` crate when
 //!   the editor opens. The font of the JUCE build is embedded the same way.
-//! - **The keyboard** of the JUCE editor is not there. nice-plug's editor
-//!   API has no way of sending a note to the host, so a keyboard that could
-//!   not play would only be in the way. The host's own keyboard is used
-//!   instead.
+//! - **The keyboard** of the JUCE editor is not there. nice-plug's wrappers
+//!   do support MIDI output — the plugin would declare
+//!   `MIDI_OUTPUT = MidiConfig::Basic` and the editor would hand the notes
+//!   to the plugin, which would send them to the host from its process
+//!   function — but that is a feature of the plugin rather than a port of
+//!   a widget, and it changes the plugin's bus layout, so it is a decision
+//!   of its own. The host's own keyboard is used until then.
 //! - **The file dialogs** are the ones of `rfd`, which are the native
 //!   dialogs of the system. The patch is written as a `.ripx` file, which is
 //!   the JSON document of `rippler_params::patch`, and the old XML patches
@@ -44,8 +47,10 @@ pub mod tension;
 pub mod theme;
 
 use nice_plug::util::AtomicF32;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use egui::{Context, Ui};
@@ -58,6 +63,7 @@ use nice_plug_egui::{Frame, NiceEguiApp};
 use rippler_params::apply_parameter;
 use rippler_params::params::RipplerParams;
 
+use crate::background::Background;
 use crate::editor::settings::Settings;
 use crate::editor::theme::Theme;
 use crate::params::UserSample;
@@ -66,6 +72,12 @@ use crate::params::UserSample;
 ///
 /// The JUCE editor is 650 by 485.
 pub const EDITOR_SIZE: LogicalSize<f32> = LogicalSize::new(650.0, 485.0);
+
+/// The program the patch menu shows when the editor is not on one.
+///
+/// The JUCE build's patch menu shows the name of the program it is on, and
+/// "Patch" when it is not on one of the factory presets.
+pub(crate) const NO_PROGRAM: i32 = -1;
 
 /// The font of the JUCE build.
 static UBUNTU_MEDIUM: &[u8] = include_bytes!("../../../../../resources/Ubuntu-Medium.ttf");
@@ -96,6 +108,13 @@ fn set_font(context: &Context) {
 pub(crate) struct Parameters {
     /// The pointer of every parameter, by its identifier.
     map: HashMap<String, ParamPtr>,
+    /// The identifiers the editor has asked for.
+    ///
+    /// The editor writes down every identifier it looks up, so that the
+    /// tests can check that it only ever asks for parameters the plugin
+    /// has.
+    #[cfg(test)]
+    used: Mutex<BTreeSet<String>>,
 }
 
 impl Parameters {
@@ -106,12 +125,46 @@ impl Parameters {
             .into_iter()
             .map(|(id, pointer, _)| (id, pointer))
             .collect();
-        Self { map }
+        Self {
+            map,
+            #[cfg(test)]
+            used: Mutex::new(BTreeSet::new()),
+        }
     }
 
     /// The pointer of a parameter.
+    ///
+    /// A parameter the plugin does not have is a mistake in the editor, and
+    /// a debug build says so instead of quietly doing nothing: a typo in an
+    /// identifier would otherwise turn a widget into a dead control without
+    /// anyone noticing.
+    ///
+    /// The generated `apply_parameter!` and `with_parameter!` macros of
+    /// `rippler-params` cannot catch such a typo, because they match the
+    /// identifier at run time as well: they keep the table of the
+    /// identifiers and the parameters apart, but a call site that names a
+    /// parameter that does not exist still compiles.
     fn pointer(&self, id: &str) -> Option<ParamPtr> {
-        self.map.get(id).copied()
+        #[cfg(test)]
+        if let Ok(mut used) = self.used.lock() {
+            used.insert(id.to_string());
+        }
+
+        let pointer = self.map.get(id).copied();
+        debug_assert!(
+            pointer.is_some(),
+            "the editor asks for a parameter the plugin does not have: {id}"
+        );
+        pointer
+    }
+
+    /// The identifiers the editor has asked for.
+    #[cfg(test)]
+    pub fn used_ids(&self) -> BTreeSet<String> {
+        self.used
+            .lock()
+            .map(|used| used.clone())
+            .unwrap_or_default()
     }
 
     /// The normalised value of a parameter.
@@ -152,6 +205,15 @@ impl Parameters {
         };
         // SAFETY: see `normalized`.
         unsafe { pointer.preview_normalized(plain) }
+    }
+
+    /// The plain value of a normalised value.
+    pub fn preview_plain(&self, id: &str, normalized: f32) -> f32 {
+        let Some(pointer) = self.pointer(id) else {
+            return 0.0;
+        };
+        // SAFETY: see `normalized`.
+        unsafe { pointer.preview_plain(normalized) }
     }
 
     /// The plain value of every parameter, by its identifier.
@@ -227,6 +289,11 @@ impl<'a> Params<'a> {
     /// The normalised value of a plain value.
     pub fn preview_normalized(&self, id: &str, plain: f32) -> f32 {
         self.parameters.preview_normalized(id, plain)
+    }
+
+    /// The plain value of a normalised value.
+    pub fn preview_plain(&self, id: &str, normalized: f32) -> f32 {
+        self.parameters.preview_plain(id, normalized)
     }
 
     /// The plain value of every parameter, by its identifier.
@@ -312,6 +379,20 @@ pub struct EditorState {
     user_sample: Arc<Mutex<Option<UserSample>>>,
     /// The meter's value, shared with the audio thread.
     meter: Arc<AtomicF32>,
+    /// The work the editor hands to the background thread.
+    background: Background,
+    /// The program the patch menu shows.
+    ///
+    /// It is the index of the factory preset the editor is on, or `-1` when
+    /// it is not on one. The JUCE build shows the name of the program in
+    /// the patch menu.
+    current_program: Arc<AtomicI32>,
+    /// The bindings the editor drew.
+    ///
+    /// The editor writes down what every knob is bound to, which the tests
+    /// use to check that the widgets are bound to the parameters the JUCE
+    /// editor binds them to.
+    bindings: Arc<Mutex<Vec<knob::Binding>>>,
 }
 
 impl EditorState {
@@ -322,6 +403,7 @@ impl EditorState {
         polyphony: Arc<AtomicUsize>,
         meter: Arc<AtomicF32>,
         user_sample: Arc<Mutex<Option<UserSample>>>,
+        background: Background,
     ) -> Self {
         Self {
             params,
@@ -330,12 +412,30 @@ impl EditorState {
             velocity_mode: Arc::new(AtomicBool::new(false)),
             meter,
             user_sample,
+            background,
+            current_program: Arc::new(AtomicI32::new(NO_PROGRAM)),
+            bindings: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// A user sample that the editor decoded, waiting for the audio thread.
     pub(crate) fn user_sample(&self) -> &Arc<Mutex<Option<UserSample>>> {
         &self.user_sample
+    }
+
+    /// The work the editor hands to the background thread.
+    pub(crate) fn background(&self) -> &Background {
+        &self.background
+    }
+
+    /// The program the patch menu shows.
+    pub(crate) fn current_program(&self) -> &Arc<AtomicI32> {
+        &self.current_program
+    }
+
+    /// The bindings the editor drew.
+    pub(crate) fn bindings(&self) -> &Mutex<Vec<knob::Binding>> {
+        &self.bindings
     }
 
     /// The plugin's parameters.
@@ -429,12 +529,29 @@ impl NiceEguiApp for RipplerEditor {
         ui.painter()
             .rect_filled(ui.max_rect(), 0.0, theme.background);
 
+        // The bindings of the last frame are of no use any more.
+        if let Ok(mut bindings) = self.state.bindings().lock() {
+            bindings.clear();
+        }
+
         let Some(open) = self.open.as_mut() else {
             return;
         };
 
         let setter = open.gui.param_setter();
         let params = Params::new(self.state.params(), &open.parameters, &setter);
+
+        // A sample that was decoded in the background is handed to the
+        // audio thread here, and the mallet becomes the user's file.
+        if let Some(sample) = self.state.background().take_decoded() {
+            if let Ok(mut slot) = self.state.user_sample().lock() {
+                *slot = Some(sample);
+            }
+            params.set_legacy(
+                "mallet_type",
+                rippler_dsp::mallet::MalletType::UserFile as usize as f64,
+            );
+        }
 
         let panels = panels::Panels {
             params: &params,
@@ -445,7 +562,9 @@ impl NiceEguiApp for RipplerEditor {
             settings: self.state.settings(),
             polyphony: self.state.polyphony(),
             velocity: self.state.velocity_mode(),
-            user_sample: self.state.user_sample(),
+            background: self.state.background(),
+            current_program: self.state.current_program(),
+            bindings: self.state.bindings(),
         };
 
         panels::top_bar(ui, &panels);
@@ -474,6 +593,7 @@ impl NiceEguiApp for RipplerEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::background::Background;
     use crate::editor::settings::DEFAULT_POLYPHONY;
     use std::sync::atomic::Ordering;
 
@@ -486,6 +606,7 @@ mod tests {
             Arc::new(AtomicUsize::new(DEFAULT_POLYPHONY)),
             Arc::new(AtomicF32::new(0.0)),
             Arc::new(Mutex::new(None)),
+            Background::default(),
         )
     }
 

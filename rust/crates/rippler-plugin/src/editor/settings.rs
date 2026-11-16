@@ -72,15 +72,29 @@ impl Settings {
 
     /// Writes the settings to a file.
     ///
-    /// The directory is created if it is not there. A file that cannot be
-    /// written is ignored: the settings simply do not survive the session.
+    /// The directory is created if it is not there. The file is written to a
+    /// temporary file in the same directory and that file is renamed over
+    /// the settings, which is atomic: two plugin instances that write their
+    /// settings at the same time cannot leave a half-written file behind,
+    /// which would silently revert the settings to the defaults.
+    ///
+    /// A file that cannot be written is ignored: the settings simply do not
+    /// survive the session.
     pub fn write_to(&self, path: &Path) -> std::io::Result<()> {
         if let Some(directory) = path.parent() {
             std::fs::create_dir_all(directory)?;
         }
         let text = serde_json::to_string_pretty(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        std::fs::write(path, text)
+
+        let temporary = temporary_path(path);
+        std::fs::write(&temporary, text)?;
+        if let Err(error) = std::fs::rename(&temporary, path) {
+            // The temporary file is of no use any more.
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Brings the settings back into range.
@@ -107,6 +121,19 @@ impl Settings {
             polyphony,
         }
     }
+}
+
+/// The path of the temporary file the settings are written to.
+///
+/// The file is in the same directory as the settings, so that renaming it
+/// over them stays on the same file system and is therefore atomic.
+fn temporary_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("settings.json"));
+    name.push_str(".tmp");
+    path.with_file_name(name)
 }
 
 /// The path of the settings file.
@@ -251,5 +278,29 @@ mod tests {
             polyphony: 8,
         };
         assert_eq!(settings.sanitised().ui_scale, 1.25);
+    }
+
+    #[test]
+    fn the_settings_are_written_atomically() {
+        let directory = temporary_directory("atomic");
+        let path = directory.join("settings.json");
+
+        let settings = Settings {
+            dark_theme: true,
+            ui_scale: 1.5,
+            polyphony: 12,
+        };
+        settings.write_to(&path).expect("the settings are written");
+
+        // The file that was written is the whole of the settings...
+        assert_eq!(Settings::read_from(&path), settings);
+
+        // ...and the temporary file it was written through is gone.
+        let files: Vec<String> = std::fs::read_dir(&directory)
+            .expect("the directory can be read")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files, ["settings.json"]);
     }
 }

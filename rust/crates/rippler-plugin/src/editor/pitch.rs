@@ -139,12 +139,29 @@ pub(crate) fn apply_change(
 }
 
 /// The text the control shows.
+///
+/// The JUCE build prints the coarse value as it is and the fine value with
+/// a width of two and a fill of zeros, and it rounds neither of them.
 pub(crate) fn label(coarse: f64, fine: f64, has_fine: bool) -> String {
     let sign = if coarse < 0.0 || fine < 0.0 { "-" } else { "" };
     if has_fine {
-        format!("{sign}{:.0}.{:02}", coarse.abs(), fine.abs().round() as i64)
+        format!("{sign}{}.{}", coarse.abs(), fine_value(fine.abs()))
     } else {
-        format!("{sign}{:.0}", coarse.abs())
+        format!("{sign}{}", coarse.abs())
+    }
+}
+
+/// The text of the fine value.
+///
+/// The C++ prints the value with a width of two and fills the gap with
+/// zeros, so that a value of five is printed as "05". The value is not
+/// rounded: the C++ prints a value of 12.5 as "12.5".
+fn fine_value(value: f64) -> String {
+    let text = format!("{value}");
+    if text.len() < 2 {
+        format!("0{text}")
+    } else {
+        text
     }
 }
 
@@ -379,5 +396,12 @@ mod tests {
         assert_eq!(label(-3.0, 50.0, true), "-3.50");
         assert_eq!(label(3.0, 0.0, false), "3");
         assert_eq!(label(-3.0, 0.0, false), "-3");
+    }
+
+    #[test]
+    fn the_label_does_not_round_the_fine_value() {
+        // The C++ prints the fine value as it is, so a value of 12.5 is
+        // printed as it is and not as a whole number of hundredths.
+        assert_eq!(label(3.0, 12.5, true), "3.12.5");
     }
 }

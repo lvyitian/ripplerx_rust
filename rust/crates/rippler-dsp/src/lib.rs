@@ -13,5 +13,6 @@ pub mod limiter;
 pub mod lut;
 pub mod luts;
 pub mod models;
+pub mod partial;
 pub mod rng;
 pub mod utils;

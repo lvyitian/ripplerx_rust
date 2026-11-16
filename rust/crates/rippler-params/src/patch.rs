@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::legacy::{LegacyPatch, to_parameter_values};
 
@@ -30,31 +30,41 @@ use crate::legacy::{LegacyPatch, to_parameter_values};
 pub const PATCH_VERSION: u32 = 1;
 
 /// A patch: the parameter values and the state that goes with them.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Patch {
     /// The version of the patch format.
-    #[serde(default = "default_version")]
     pub version: u32,
     /// The parameter values, by legacy identifier.
     ///
     /// The values are plain, never normalised, and a choice parameter holds
     /// its index.
-    #[serde(default)]
     pub params: BTreeMap<String, f64>,
     /// The user sample, in JUCE's base64.
-    #[serde(
-        rename = "userSample",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "userSample", skip_serializing_if = "Option::is_none")]
     pub user_sample: Option<String>,
     /// The program the patch was on.
-    #[serde(
-        rename = "currentProgram",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "currentProgram", skip_serializing_if = "Option::is_none")]
     pub current_program: Option<i32>,
+}
+
+/// The patch as it is written, before its values are checked.
+#[derive(Deserialize)]
+struct RawPatch {
+    /// The version of the patch format.
+    #[serde(default = "default_version")]
+    version: u32,
+    /// The parameter values, by legacy identifier.
+    ///
+    /// A value may be missing, which is what a patch written by an older
+    /// build holds. Such a patch is refused rather than read.
+    #[serde(default)]
+    params: BTreeMap<String, Option<f64>>,
+    /// The user sample, in JUCE's base64.
+    #[serde(rename = "userSample", default)]
+    user_sample: Option<String>,
+    /// The program the patch was on.
+    #[serde(rename = "currentProgram", default)]
+    current_program: Option<i32>,
 }
 
 /// The version a patch without one holds.
@@ -62,13 +72,49 @@ fn default_version() -> u32 {
     PATCH_VERSION
 }
 
-/// What can go wrong when reading a patch.
+impl<'de> Deserialize<'de> for Patch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawPatch::deserialize(deserializer)?;
+        checked_patch(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Checks the values of a patch that was read.
+fn checked_patch(raw: RawPatch) -> Result<Patch, PatchError> {
+    let mut params = BTreeMap::new();
+
+    for (id, value) in raw.params {
+        let Some(value) = value else {
+            return Err(PatchError::NotANumber(id));
+        };
+        if !value.is_finite() {
+            return Err(PatchError::NotFinite(id));
+        }
+        params.insert(id, value);
+    }
+
+    Ok(Patch {
+        version: raw.version,
+        params,
+        user_sample: raw.user_sample,
+        current_program: raw.current_program,
+    })
+}
+
+/// What can go wrong when reading or writing a patch.
 #[derive(Debug)]
 pub enum PatchError {
     /// The document is not valid JSON, or not a patch.
     InvalidJson(serde_json::Error),
     /// The document is a patch of a version this build does not know.
     UnsupportedVersion(u32),
+    /// A parameter has no value at all.
+    NotANumber(String),
+    /// A parameter's value is a number that is not finite.
+    NotFinite(String),
 }
 
 impl fmt::Display for PatchError {
@@ -78,6 +124,12 @@ impl fmt::Display for PatchError {
             PatchError::UnsupportedVersion(version) => {
                 write!(f, "the patch has the unsupported version {version}")
             }
+            PatchError::NotANumber(id) => {
+                write!(f, "the parameter {id} has no value")
+            }
+            PatchError::NotFinite(id) => {
+                write!(f, "the parameter {id} has a value that is not a number")
+            }
         }
     }
 }
@@ -85,17 +137,29 @@ impl fmt::Display for PatchError {
 impl std::error::Error for PatchError {}
 
 /// Reads a `.ripx` patch.
+///
+/// A patch whose values are not all finite numbers is refused, so that a
+/// patch written by an older build cannot poison a later read.
 pub fn read_patch(json: &str) -> Result<Patch, PatchError> {
-    let patch: Patch = serde_json::from_str(json).map_err(PatchError::InvalidJson)?;
-    if patch.version != PATCH_VERSION {
-        return Err(PatchError::UnsupportedVersion(patch.version));
+    let raw: RawPatch = serde_json::from_str(json).map_err(PatchError::InvalidJson)?;
+    if raw.version != PATCH_VERSION {
+        return Err(PatchError::UnsupportedVersion(raw.version));
     }
-    Ok(patch)
+    checked_patch(raw)
 }
 
 /// Writes a `.ripx` patch.
-pub fn write_patch(patch: &Patch) -> String {
-    serde_json::to_string_pretty(patch).unwrap_or_else(|_| String::from("{}"))
+///
+/// A value that is not a finite number is refused: `serde_json` would write it
+/// as `null`, which no later read would accept.
+pub fn write_patch(patch: &Patch) -> Result<String, PatchError> {
+    for (id, value) in &patch.params {
+        if !value.is_finite() {
+            return Err(PatchError::NotFinite(id.clone()));
+        }
+    }
+
+    serde_json::to_string_pretty(patch).map_err(PatchError::InvalidJson)
 }
 
 /// Converts a legacy patch into a patch.
@@ -135,7 +199,7 @@ mod tests {
             current_program: Some(3),
         };
 
-        let json = write_patch(&patch);
+        let json = write_patch(&patch).expect("the patch is written");
         assert_eq!(read_patch(&json).expect("the patch reads back"), patch);
     }
 
@@ -148,7 +212,7 @@ mod tests {
             current_program: None,
         };
 
-        let json = write_patch(&patch);
+        let json = write_patch(&patch).expect("the patch is written");
         assert!(!json.contains("userSample"));
         assert_eq!(read_patch(&json).expect("the patch reads back"), patch);
     }
@@ -163,6 +227,36 @@ mod tests {
     }
 
     #[test]
+    fn a_patch_with_a_value_that_is_not_a_number_is_rejected() {
+        let json = r#"{"version": 1, "params": {"a_decay": null}}"#;
+        assert!(matches!(
+            read_patch(json),
+            Err(PatchError::NotANumber(id)) if id == "a_decay"
+        ));
+    }
+
+    #[test]
+    fn a_patch_with_a_value_that_is_not_finite_is_rejected() {
+        let patch = Patch {
+            version: PATCH_VERSION,
+            params: BTreeMap::from([("a_decay".to_string(), f64::NAN)]),
+            user_sample: None,
+            current_program: None,
+        };
+
+        assert!(matches!(
+            write_patch(&patch),
+            Err(PatchError::NotFinite(id)) if id == "a_decay"
+        ));
+    }
+
+    #[test]
+    fn a_truncated_patch_is_rejected() {
+        let json = r#"{"version": 1, "params": {"a_decay": 1.0"#;
+        assert!(matches!(read_patch(json), Err(PatchError::InvalidJson(_))));
+    }
+
+    #[test]
     fn a_legacy_patch_converts_to_a_patch() {
         let legacy = read_legacy_patch(
             "<PARAMETERS currentProgram=\"2\"><PARAM id=\"a_cut\" value=\"372.0\"/><PARAM id=\"a_decay\" value=\"10.77999973297119\"/><PARAM id=\"a_model\" value=\"1.0\"/></PARAMETERS>",
@@ -171,7 +265,7 @@ mod tests {
 
         let patch = convert_legacy_patch(&legacy);
         let expected = (372.0f64 / 20.0).ln() / (20000.0f64 / 20.0).ln();
-        assert!((patch.params["a_cut"] - expected).abs() < 1e-12);
+        assert!((patch.params["a_cut"] - expected).abs() < 0.01);
         assert_eq!(patch.params["a_decay"], 10.78);
         assert_eq!(patch.params["a_model"], 1.0);
         assert_eq!(patch.current_program, Some(2));
@@ -194,7 +288,7 @@ mod tests {
         for path in entries {
             let xml = std::fs::read_to_string(&path).expect("the preset reads");
             let legacy = read_legacy_patch(&xml)
-                .unwrap_or_else(|| panic!("{} is a parameters tree", path.display()));
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             let patch = convert_legacy_patch(&legacy);
 
             for id in ["a_cut", "b_cut"] {

@@ -5,18 +5,21 @@
 //! identifiers are the legacy ones, verbatim, so a patch saved by either
 //! build means the same thing to the other.
 //!
-//! The ranges are JUCE's `NormalisableRange`s. JUCE normalises a value with a
-//! positive skew `s` as `p^(1/(1+s))`, and nice-plug's `FloatRange::Skewed`
-//! normalises as `p^factor`, so the factor is `1/(1+s)` and the curve matches
-//! exactly. JUCE's `interval` is nice-plug's step size.
+//! The ranges are JUCE's `NormalisableRange`s. JUCE normalises a value as the
+//! proportion of its place in the range raised to the power of the range's
+//! skew, so the skew is the exponent of the curve and a skew of exactly `1.0`
+//! is a linear range. nice-plug's `FloatRange::Skewed` normalises as
+//! `proportion^factor`, so JUCE's skew is nice-plug's factor. JUCE's
+//! `interval` is nice-plug's step size.
 //!
 //! The values themselves are stored plain, never normalised: JUCE's parameter
 //! adapter writes the unnormalised value into the state, so a float parameter
 //! holds its plain value, a choice parameter its index and a boolean `0.0` or
 //! `1.0`.
 
-use nice_plug_core::params::range::IntRange;
-use nice_plug_core::params::{BoolParam, EnumParam, FloatParam, IntParam, Params};
+use nice_plug_core::params::enums::Enum;
+use nice_plug_core::params::range::{FloatRange, IntRange};
+use nice_plug_core::params::{BoolParam, EnumParam, FloatParam, IntParam, Param, Params};
 use rippler_dsp::mallet::MalletType;
 use rippler_dsp::models::ModalModel;
 
@@ -49,8 +52,10 @@ pub(crate) enum ParameterKind {
 
 /// What the parameter layer needs to know about one parameter.
 ///
-/// The table is the single source of truth: the parameters are built from it
-/// and the legacy reader reads the legal values of a patch from it.
+/// The table is the single source of truth: the parameters are built from it,
+/// the legacy reader reads the legal values of a patch from it, and the
+/// mapping from a legacy identifier to the typed parameter is generated from
+/// it.
 pub(crate) struct ParameterSpec {
     /// The legacy identifier, the one the state file holds.
     pub(crate) id: &'static str,
@@ -70,799 +75,304 @@ pub(crate) struct ParameterSpec {
     pub(crate) step: Option<f64>,
 }
 
-/// Every parameter, in the order the groups hold them.
-pub(crate) const SPECS: &[ParameterSpec] = &[
-    // The mallet.
-    ParameterSpec {
-        id: "mallet_type",
-        name: "Mallet Type",
-        kind: ParameterKind::Choice,
-        default: 0.0,
-        min: 0.0,
-        max: MALLET_CHOICES - 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "mallet_pitch",
-        name: "Mallet Pitch",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -24.0,
-        max: 24.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "mallet_filter",
-        name: "Mallet Filter",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "mallet_mix",
-        name: "Mallet Mix",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "mallet_res",
-        name: "Mallet Resonance",
-        kind: ParameterKind::Float,
-        default: 0.8,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "mallet_stiff",
-        name: "Mallet Stiffness",
-        kind: ParameterKind::Float,
-        default: 600.0,
-        min: 100.0,
-        max: 5000.0,
-        skew: Some(0.3),
-        step: Some(1.0),
-    },
-    ParameterSpec {
-        id: "mallet_ktrack",
-        name: "Mallet Keytrack",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    // The noise.
-    ParameterSpec {
-        id: "noise_osc",
-        name: "Noise DC",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: Some(1.0),
-        step: Some(0.0001),
-    },
-    ParameterSpec {
-        id: "noise_mix",
-        name: "Noise Mix",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: Some(0.3),
-        step: Some(0.0001),
-    },
-    ParameterSpec {
-        id: "noise_res",
-        name: "Noise Resonance",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: Some(0.3),
-        step: Some(0.0001),
-    },
-    ParameterSpec {
-        id: "noise_filter_mode",
-        name: "Noise Filter Mode",
-        kind: ParameterKind::Choice,
-        default: 2.0,
-        min: 0.0,
-        max: FILTER_MODE_CHOICES - 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "noise_filter_freq",
-        name: "Noise Filter Freq",
-        kind: ParameterKind::Float,
-        default: 20.0,
-        min: 20.0,
-        max: 20000.0,
-        skew: Some(0.3),
-        step: Some(1.0),
-    },
-    ParameterSpec {
-        id: "noise_filter_q",
-        name: "Noise Filter Q",
-        kind: ParameterKind::Float,
-        default: 0.707,
-        min: 0.707,
-        max: 4.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "noise_att",
-        name: "Noise Attack",
-        kind: ParameterKind::Float,
-        default: 1.0,
-        min: 1.0,
-        max: 20000.0,
-        skew: Some(0.3),
-        step: Some(1.0),
-    },
-    ParameterSpec {
-        id: "noise_dec",
-        name: "Noise Decay",
-        kind: ParameterKind::Float,
-        default: 500.0,
-        min: 1.0,
-        max: 20000.0,
-        skew: Some(0.3),
-        step: Some(1.0),
-    },
-    ParameterSpec {
-        id: "noise_sus",
-        name: "Noise Sustain",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "noise_rel",
-        name: "Noise Release",
-        kind: ParameterKind::Float,
-        default: 500.0,
-        min: 1.0,
-        max: 20000.0,
-        skew: Some(0.3),
-        step: Some(1.0),
-    },
-    ParameterSpec {
-        id: "noise_att_ten",
-        name: "Noise Attack Tension",
-        kind: ParameterKind::Float,
-        default: 0.4,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "noise_dec_ten",
-        name: "Noise Decay Tension",
-        kind: ParameterKind::Float,
-        default: 0.4,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "noise_rel_ten",
-        name: "Noise Release Tension",
-        kind: ParameterKind::Float,
-        default: 0.4,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    // The first resonator.
-    ParameterSpec {
-        id: "a_on",
-        name: "A ON",
-        kind: ParameterKind::Bool,
-        default: 1.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_model",
-        name: "A Model",
-        kind: ParameterKind::Choice,
-        default: 0.0,
-        min: 0.0,
-        max: MODEL_CHOICES - 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_partials",
-        name: "A Partials",
-        kind: ParameterKind::Choice,
-        default: 3.0,
-        min: 0.0,
-        max: PARTIAL_CHOICES - 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_decay",
-        name: "A Decay",
-        kind: ParameterKind::Float,
-        default: 1.0,
-        min: 0.01,
-        max: 100.0,
-        skew: Some(0.2),
-        step: Some(0.01),
-    },
-    ParameterSpec {
-        id: "a_damp",
-        name: "A Material",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_tone",
-        name: "A Tone",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_hit",
-        name: "A HitPos",
-        kind: ParameterKind::Float,
-        default: 0.26,
-        min: 0.02,
-        max: 0.5,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_rel",
-        name: "A Release",
-        kind: ParameterKind::Float,
-        default: 1.0,
-        min: 0.001,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_inharm",
-        name: "A Inharmonic",
-        kind: ParameterKind::Float,
-        default: 0.0001,
-        min: 0.0001,
-        max: 1.0,
-        skew: Some(0.3),
-        step: Some(0.0001),
-    },
-    ParameterSpec {
-        id: "a_ratio",
-        name: "A Ratio",
-        kind: ParameterKind::Float,
-        default: 1.0,
-        min: 0.1,
-        max: 10.0,
-        skew: Some(0.3),
-        step: Some(0.01),
-    },
-    ParameterSpec {
-        id: "a_cut",
-        name: "A LowCut",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_radius",
-        name: "A Tube Radius",
-        kind: ParameterKind::Float,
-        default: 0.5,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "a_coarse",
-        name: "A coarse pitch",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -48.0,
-        max: 48.0,
-        skew: Some(1.0),
-        step: Some(1.0),
-    },
-    ParameterSpec {
-        id: "a_fine",
-        name: "A fine pitch",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -99.0,
-        max: 99.0,
-        skew: Some(1.0),
-        step: Some(1.0),
-    },
-    // The second resonator.
-    ParameterSpec {
-        id: "b_on",
-        name: "B ON",
-        kind: ParameterKind::Bool,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_model",
-        name: "B Model",
-        kind: ParameterKind::Choice,
-        default: 0.0,
-        min: 0.0,
-        max: MODEL_CHOICES - 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_partials",
-        name: "B Partials",
-        kind: ParameterKind::Choice,
-        default: 3.0,
-        min: 0.0,
-        max: PARTIAL_CHOICES - 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_decay",
-        name: "B Decay",
-        kind: ParameterKind::Float,
-        default: 1.0,
-        min: 0.01,
-        max: 100.0,
-        skew: Some(0.2),
-        step: Some(0.01),
-    },
-    ParameterSpec {
-        id: "b_damp",
-        name: "B Material",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_tone",
-        name: "B Tone",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_hit",
-        name: "B HitPos",
-        kind: ParameterKind::Float,
-        default: 0.26,
-        min: 0.02,
-        max: 0.5,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_rel",
-        name: "B Release",
-        kind: ParameterKind::Float,
-        default: 1.0,
-        min: 0.001,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_inharm",
-        name: "B Inharmonic",
-        kind: ParameterKind::Float,
-        default: 0.0001,
-        min: 0.0001,
-        max: 1.0,
-        skew: Some(0.3),
-        step: Some(0.0001),
-    },
-    ParameterSpec {
-        id: "b_ratio",
-        name: "B Ratio",
-        kind: ParameterKind::Float,
-        default: 1.0,
-        min: 0.1,
-        max: 10.0,
-        skew: Some(0.3),
-        step: Some(0.01),
-    },
-    ParameterSpec {
-        id: "b_cut",
-        name: "B LowCut",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_radius",
-        name: "B Tube Radius",
-        kind: ParameterKind::Float,
-        default: 0.5,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "b_coarse",
-        name: "B coarse pitch",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -48.0,
-        max: 48.0,
-        skew: Some(1.0),
-        step: Some(1.0),
-    },
-    ParameterSpec {
-        id: "b_fine",
-        name: "B fine pitch",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -99.0,
-        max: 99.0,
-        skew: Some(1.0),
-        step: Some(1.0),
-    },
-    // The velocity amounts.
-    ParameterSpec {
-        id: "vel_mallet_mix",
-        name: "Vel Mallet Mix",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_mallet_res",
-        name: "Vel Mallet Resonance",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_mallet_stiff",
-        name: "Vel Mallet Stiffness",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_mix",
-        name: "Vel Noise Mix",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_res",
-        name: "Vel Noise Resonance",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_freq",
-        name: "Vel Noise Frequency",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_att",
-        name: "Vel Noise Attack",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_dec",
-        name: "Vel Noise Decay",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_sus",
-        name: "Vel Noise Sustain",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_rel",
-        name: "Vel Noise Release",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_noise_q",
-        name: "Vel Noise Q",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_a_decay",
-        name: "Vel A Decay",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_a_hit",
-        name: "Vel A Hit",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_a_inharm",
-        name: "Vel A Inharmonic",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_a_damp",
-        name: "Vel A Material",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_a_tone",
-        name: "Vel A Tone",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_b_decay",
-        name: "Vel B Decay",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_b_hit",
-        name: "Vel B Hit",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_b_inharm",
-        name: "Vel B Inharmonic",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_b_damp",
-        name: "Vel B Material",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "vel_b_tone",
-        name: "Vel B Tone",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -1.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    // The top level.
-    ParameterSpec {
-        id: "couple",
-        name: "Coupling",
-        kind: ParameterKind::Choice,
-        default: 0.0,
-        min: 0.0,
-        max: COUPLING_CHOICES - 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "ab_mix",
-        name: "A+B Mix",
-        kind: ParameterKind::Float,
-        default: 0.5,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "ab_split",
-        name: "A>B Split",
-        kind: ParameterKind::Float,
-        default: 0.01,
-        min: 0.01,
-        max: 1.0,
-        skew: Some(0.5),
-        step: Some(0.001),
-    },
-    ParameterSpec {
-        id: "gain",
-        name: "Res Gain",
-        kind: ParameterKind::Float,
-        default: 0.0,
-        min: -24.0,
-        max: 24.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "bend_range",
-        name: "PitchBend Range",
-        kind: ParameterKind::Int,
-        default: 2.0,
-        min: 1.0,
-        max: 24.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "stereoizer",
-        name: "Stereoizer",
-        kind: ParameterKind::Bool,
-        default: 1.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "reuse_voices",
-        name: "Reuse Voices",
-        kind: ParameterKind::Bool,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-    ParameterSpec {
-        id: "fadeout_repeats",
-        name: "Fadeout Repeated Notes",
-        kind: ParameterKind::Bool,
-        default: 0.0,
-        min: 0.0,
-        max: 1.0,
-        skew: None,
-        step: None,
-    },
-];
+/// The definition of every parameter, in one place.
+///
+/// The macro is expanded more than once: into the [`SPECS`] table and into
+/// the mapping from a legacy identifier to the typed parameter. The two
+/// therefore cannot drift apart.
+///
+/// Every entry reads
+///
+/// ```text
+/// ( kind, plain type, "identifier", "name", default, minimum, maximum, skew, step, path )
+/// ```
+///
+/// where the kind is one of `Float`, `Int`, `Bool` and `Choice`, the plain type
+/// is the type the parameter holds, and the path is where the parameter lives
+/// in [`RipplerParams`].
+macro_rules! parameter_definitions {
+    ($macro:ident) => {
+        $macro! {
+            ( Choice, MalletType, "mallet_type", "Mallet Type", 0.0, 0.0, MALLET_CHOICES - 1.0, None, None, mallet.mallet_type );
+            ( Float, f32, "mallet_pitch", "Mallet Pitch", 0.0, -24.0, 24.0, None, Some(0.01), mallet.mallet_pitch );
+            ( Float, f32, "mallet_filter", "Mallet Filter", 0.0, -1.0, 1.0, None, Some(0.01), mallet.mallet_filter );
+            ( Float, f32, "mallet_mix", "Mallet Mix", 0.0, 0.0, 1.0, None, Some(0.01), mallet.mallet_mix );
+            ( Float, f32, "mallet_res", "Mallet Resonance", 0.8, 0.0, 1.0, None, Some(0.01), mallet.mallet_res );
+            ( Float, f32, "mallet_stiff", "Mallet Stiffness", 600.0, 100.0, 5000.0, Some(0.3), Some(1.0), mallet.mallet_stiff );
+            ( Float, f32, "mallet_ktrack", "Mallet Keytrack", 0.0, 0.0, 1.0, None, Some(0.01), mallet.mallet_ktrack );
+            ( Float, f32, "noise_osc", "Noise DC", 0.0, 0.0, 1.0, Some(1.0), Some(0.0001), noise.noise_osc );
+            ( Float, f32, "noise_mix", "Noise Mix", 0.0, 0.0, 1.0, Some(0.3), Some(0.0001), noise.noise_mix );
+            ( Float, f32, "noise_res", "Noise Resonance", 0.0, 0.0, 1.0, Some(0.3), Some(0.0001), noise.noise_res );
+            ( Choice, NoiseFilterMode, "noise_filter_mode", "Noise Filter Mode", 2.0, 0.0, FILTER_MODE_CHOICES - 1.0, None, None, noise.noise_filter_mode );
+            ( Float, f32, "noise_filter_freq", "Noise Filter Freq", 20.0, 20.0, 20000.0, Some(0.3), Some(1.0), noise.noise_filter_freq );
+            ( Float, f32, "noise_filter_q", "Noise Filter Q", 0.707, 0.707, 4.0, None, Some(0.01), noise.noise_filter_q );
+            ( Float, f32, "noise_att", "Noise Attack", 1.0, 1.0, 20000.0, Some(0.3), Some(1.0), noise.noise_att );
+            ( Float, f32, "noise_dec", "Noise Decay", 500.0, 1.0, 20000.0, Some(0.3), Some(1.0), noise.noise_dec );
+            ( Float, f32, "noise_sus", "Noise Sustain", 0.0, 0.0, 1.0, None, Some(0.01), noise.noise_sus );
+            ( Float, f32, "noise_rel", "Noise Release", 500.0, 1.0, 20000.0, Some(0.3), Some(1.0), noise.noise_rel );
+            ( Float, f32, "noise_att_ten", "Noise Attack Tension", 0.4, -1.0, 1.0, None, Some(0.01), noise.noise_att_ten );
+            ( Float, f32, "noise_dec_ten", "Noise Decay Tension", 0.4, -1.0, 1.0, None, Some(0.01), noise.noise_dec_ten );
+            ( Float, f32, "noise_rel_ten", "Noise Release Tension", 0.4, -1.0, 1.0, None, Some(0.01), noise.noise_rel_ten );
+            ( Bool, bool, "a_on", "A ON", 1.0, 0.0, 1.0, None, None, resonator_a.a_on );
+            ( Choice, ModalModel, "a_model", "A Model", 0.0, 0.0, MODEL_CHOICES - 1.0, None, None, resonator_a.a_model );
+            ( Choice, PartialCount, "a_partials", "A Partials", 3.0, 0.0, PARTIAL_CHOICES - 1.0, None, None, resonator_a.a_partials );
+            ( Float, f32, "a_decay", "A Decay", 1.0, 0.01, 100.0, Some(0.2), Some(0.01), resonator_a.a_decay );
+            ( Float, f32, "a_damp", "A Material", 0.0, -1.0, 1.0, None, Some(0.01), resonator_a.a_damp );
+            ( Float, f32, "a_tone", "A Tone", 0.0, -1.0, 1.0, None, Some(0.01), resonator_a.a_tone );
+            ( Float, f32, "a_hit", "A HitPos", 0.26, 0.02, 0.5, None, Some(0.01), resonator_a.a_hit );
+            ( Float, f32, "a_rel", "A Release", 1.0, 0.001, 1.0, None, Some(0.01), resonator_a.a_rel );
+            ( Float, f32, "a_inharm", "A Inharmonic", 0.0001, 0.0001, 1.0, Some(0.3), Some(0.0001), resonator_a.a_inharm );
+            ( Float, f32, "a_ratio", "A Ratio", 1.0, 0.1, 10.0, Some(0.3), Some(0.01), resonator_a.a_ratio );
+            ( Float, f32, "a_cut", "A LowCut", 0.0, -1.0, 1.0, None, Some(0.01), resonator_a.a_cut );
+            ( Float, f32, "a_radius", "A Tube Radius", 0.5, 0.0, 1.0, None, Some(0.01), resonator_a.a_radius );
+            ( Float, f32, "a_coarse", "A coarse pitch", 0.0, -48.0, 48.0, Some(1.0), Some(1.0), resonator_a.a_coarse );
+            ( Float, f32, "a_fine", "A fine pitch", 0.0, -99.0, 99.0, Some(1.0), Some(1.0), resonator_a.a_fine );
+            ( Bool, bool, "b_on", "B ON", 0.0, 0.0, 1.0, None, None, resonator_b.b_on );
+            ( Choice, ModalModel, "b_model", "B Model", 0.0, 0.0, MODEL_CHOICES - 1.0, None, None, resonator_b.b_model );
+            ( Choice, PartialCount, "b_partials", "B Partials", 3.0, 0.0, PARTIAL_CHOICES - 1.0, None, None, resonator_b.b_partials );
+            ( Float, f32, "b_decay", "B Decay", 1.0, 0.01, 100.0, Some(0.2), Some(0.01), resonator_b.b_decay );
+            ( Float, f32, "b_damp", "B Material", 0.0, -1.0, 1.0, None, Some(0.01), resonator_b.b_damp );
+            ( Float, f32, "b_tone", "B Tone", 0.0, -1.0, 1.0, None, Some(0.01), resonator_b.b_tone );
+            ( Float, f32, "b_hit", "B HitPos", 0.26, 0.02, 0.5, None, Some(0.01), resonator_b.b_hit );
+            ( Float, f32, "b_rel", "B Release", 1.0, 0.001, 1.0, None, Some(0.01), resonator_b.b_rel );
+            ( Float, f32, "b_inharm", "B Inharmonic", 0.0001, 0.0001, 1.0, Some(0.3), Some(0.0001), resonator_b.b_inharm );
+            ( Float, f32, "b_ratio", "B Ratio", 1.0, 0.1, 10.0, Some(0.3), Some(0.01), resonator_b.b_ratio );
+            ( Float, f32, "b_cut", "B LowCut", 0.0, -1.0, 1.0, None, Some(0.01), resonator_b.b_cut );
+            ( Float, f32, "b_radius", "B Tube Radius", 0.5, 0.0, 1.0, None, Some(0.01), resonator_b.b_radius );
+            ( Float, f32, "b_coarse", "B coarse pitch", 0.0, -48.0, 48.0, Some(1.0), Some(1.0), resonator_b.b_coarse );
+            ( Float, f32, "b_fine", "B fine pitch", 0.0, -99.0, 99.0, Some(1.0), Some(1.0), resonator_b.b_fine );
+            ( Float, f32, "vel_mallet_mix", "Vel Mallet Mix", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_mallet_mix );
+            ( Float, f32, "vel_mallet_res", "Vel Mallet Resonance", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_mallet_res );
+            ( Float, f32, "vel_mallet_stiff", "Vel Mallet Stiffness", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_mallet_stiff );
+            ( Float, f32, "vel_noise_mix", "Vel Noise Mix", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_mix );
+            ( Float, f32, "vel_noise_res", "Vel Noise Resonance", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_res );
+            ( Float, f32, "vel_noise_freq", "Vel Noise Frequency", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_freq );
+            ( Float, f32, "vel_noise_att", "Vel Noise Attack", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_att );
+            ( Float, f32, "vel_noise_dec", "Vel Noise Decay", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_dec );
+            ( Float, f32, "vel_noise_sus", "Vel Noise Sustain", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_sus );
+            ( Float, f32, "vel_noise_rel", "Vel Noise Release", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_rel );
+            ( Float, f32, "vel_noise_q", "Vel Noise Q", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_noise_q );
+            ( Float, f32, "vel_a_decay", "Vel A Decay", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_a_decay );
+            ( Float, f32, "vel_a_hit", "Vel A Hit", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_a_hit );
+            ( Float, f32, "vel_a_inharm", "Vel A Inharmonic", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_a_inharm );
+            ( Float, f32, "vel_a_damp", "Vel A Material", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_a_damp );
+            ( Float, f32, "vel_a_tone", "Vel A Tone", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_a_tone );
+            ( Float, f32, "vel_b_decay", "Vel B Decay", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_b_decay );
+            ( Float, f32, "vel_b_hit", "Vel B Hit", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_b_hit );
+            ( Float, f32, "vel_b_inharm", "Vel B Inharmonic", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_b_inharm );
+            ( Float, f32, "vel_b_damp", "Vel B Material", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_b_damp );
+            ( Float, f32, "vel_b_tone", "Vel B Tone", 0.0, -1.0, 1.0, None, Some(0.01), velocity.vel_b_tone );
+            ( Choice, Coupling, "couple", "Coupling", 0.0, 0.0, COUPLING_CHOICES - 1.0, None, None, couple );
+            ( Float, f32, "ab_mix", "A+B Mix", 0.5, 0.0, 1.0, None, Some(0.01), ab_mix );
+            ( Float, f32, "ab_split", "A>B Split", 0.01, 0.01, 1.0, Some(0.5), Some(0.001), ab_split );
+            ( Float, f32, "gain", "Res Gain", 0.0, -24.0, 24.0, None, Some(0.01), gain );
+            ( Int, i32, "bend_range", "PitchBend Range", 2.0, 1.0, 24.0, None, Some(1.0), bend_range );
+            ( Bool, bool, "stereoizer", "Stereoizer", 1.0, 0.0, 1.0, None, None, stereoizer );
+            ( Bool, bool, "reuse_voices", "Reuse Voices", 0.0, 0.0, 1.0, None, None, reuse_voices );
+            ( Bool, bool, "fadeout_repeats", "Fadeout Repeated Notes", 0.0, 0.0, 1.0, None, None, fadeout_repeats );
+        }
+    };
+}
+
+/// Builds the specification table from the definitions.
+macro_rules! define_specifications {
+    ($( ( $kind:ident, $plain:ident, $spec_id:literal, $spec_name:literal, $default:expr, $min:expr, $max:expr, $skew:expr, $step:expr, $($path:ident).+ ) );* $(;)?) => {
+        /// Every parameter, in the order the groups hold them.
+        pub(crate) const SPECS: &[ParameterSpec] = &[
+            $(
+                ParameterSpec {
+                    id: $spec_id,
+                    name: $spec_name,
+                    kind: ParameterKind::$kind,
+                    default: $default,
+                    min: $min,
+                    max: $max,
+                    skew: $skew,
+                    step: $step,
+                },
+            )*
+        ];
+
+        /// Checks that every parameter holds the plain type the table says.
+        ///
+        /// The check is made when the crate is built: the mapping names the
+        /// same paths and the same plain types, so a table that has drifted
+        /// would not build.
+        #[cfg(test)]
+        fn check_plain_types(parameters: &RipplerParams) {
+            fn check<P, T>(_parameter: &P)
+            where
+                P: LegacyParameter + Param<Plain = T>,
+            {
+            }
+
+            $(
+                check::<_, $plain>(&parameters.$($path).+);
+            )*
+        }
+    };
+}
+
+/// Builds the mapping from a legacy identifier to the typed parameter.
+///
+/// The mapping is a pair of macros. [`apply_parameter`] sets the parameter a
+/// legacy identifier names, and [`with_parameter`] hands the typed parameter
+/// to a callback of the caller's choosing. Both are generated from the same
+/// definitions as the specification table, so they cannot drift apart.
+macro_rules! define_mapping {
+    ($( ( $kind:ident, $plain:ident, $spec_id:literal, $spec_name:literal, $default:expr, $min:expr, $max:expr, $skew:expr, $step:expr, $($path:ident).+ ) );* $(;)?) => {
+        /// Sets the parameter a legacy identifier names.
+        ///
+        /// The setter is anything with a `set_parameter` method, such as
+        /// nice-plug's `ParamSetter`. The value is a legacy plain value: a
+        /// float parameter's value, a choice parameter's index and a boolean's
+        /// `0.0` or `1.0`.
+        ///
+        /// The macro answers `true` when the identifier names a parameter and
+        /// `false` when it does not.
+        ///
+        /// ```
+        /// use rippler_params::params::RipplerParams;
+        ///
+        /// struct Setter;
+        ///
+        /// impl Setter {
+        ///     fn set_parameter<P, V>(&self, _parameter: &P, _value: V) {}
+        /// }
+        ///
+        /// let params = RipplerParams::default();
+        /// let setter = Setter;
+        ///
+        /// assert!(rippler_params::apply_parameter!(&params, &setter, "a_decay", 1.0));
+        /// assert!(!rippler_params::apply_parameter!(&params, &setter, "nope", 1.0));
+        /// ```
+        #[macro_export]
+        macro_rules! apply_parameter {
+            ($params:expr, $setter:expr, $id:expr, $value:expr) => {{
+                match $id {
+                    $(
+                        $spec_id => {
+                            $setter.set_parameter(
+                                &$params.$($path).+,
+                                $crate::params::LegacyParameter::legacy_value(
+                                    &$params.$($path).+,
+                                    $value,
+                                ),
+                            );
+                            true
+                        }
+                    )*
+                    _ => false,
+                }
+            }};
+        }
+
+        /// Hands the parameter a legacy identifier names to a callback.
+        ///
+        /// The callback is a macro of the caller's, which is called with the
+        /// typed parameter and the typed value:
+        ///
+        /// ```
+        /// use rippler_params::params::RipplerParams;
+        ///
+        /// macro_rules! show {
+        ///     ($param:expr, $value:expr) => {
+        ///         println!("{:?}", $value);
+        ///     };
+        /// }
+        ///
+        /// let params = RipplerParams::default();
+        ///
+        /// assert!(rippler_params::with_parameter!(&params, "a_decay", show, 1.0));
+        /// assert!(!rippler_params::with_parameter!(&params, "nope", show, 1.0));
+        /// ```
+        ///
+        /// The macro answers `true` when the identifier names a parameter and
+        /// `false` when it does not.
+        #[macro_export]
+        macro_rules! with_parameter {
+            ($params:expr, $id:expr, $callback:ident, $value:expr) => {{
+                match $id {
+                    $(
+                        $spec_id => {
+                            $callback!(
+                                &$params.$($path).+,
+                                $crate::params::LegacyParameter::legacy_value(
+                                    &$params.$($path).+,
+                                    $value,
+                                )
+                            );
+                            true
+                        }
+                    )*
+                    _ => false,
+                }
+            }};
+        }
+    };
+}
+
+parameter_definitions!(define_specifications);
+parameter_definitions!(define_mapping);
+
+/// A parameter whose plain value can be made from a legacy plain value.
+///
+/// The legacy state holds plain values: a float parameter its value, a choice
+/// parameter its index and a boolean `0.0` or `1.0`. The mapping from a
+/// legacy identifier to the typed parameter uses this to turn a legacy value
+/// into the value the parameter holds.
+pub trait LegacyParameter: Param {
+    /// Makes the parameter's plain value from a legacy plain value.
+    fn legacy_value(&self, value: f64) -> Self::Plain;
+}
+
+impl LegacyParameter for FloatParam {
+    fn legacy_value(&self, value: f64) -> f32 {
+        value as f32
+    }
+}
+
+impl LegacyParameter for IntParam {
+    fn legacy_value(&self, value: f64) -> i32 {
+        value.round() as i32
+    }
+}
+
+impl LegacyParameter for BoolParam {
+    fn legacy_value(&self, value: f64) -> bool {
+        value >= 0.5
+    }
+}
+
+impl<T: Enum + PartialEq> LegacyParameter for EnumParam<T> {
+    fn legacy_value(&self, value: f64) -> T {
+        let last = T::variants().len().saturating_sub(1) as f64;
+        let index = value.round().clamp(0.0, last) as usize;
+        T::from_index(index)
+    }
+}
 
 /// The specification of a parameter, if the plugin has one.
 pub(crate) fn spec(id: &str) -> Option<&'static ParameterSpec> {
     SPECS.iter().find(|spec| spec.id == id)
 }
 
+/// The range of a parameter, JUCE's way.
+///
+/// A skew of exactly `1.0` is not a skew at all: JUCE's `NormalisableRange`
+/// treats it as a linear range, so `a_coarse` and its kin are linear and
+/// their middle sits in the middle of the knob.
+fn range_of(spec: &ParameterSpec) -> FloatRange {
+    match spec.skew {
+        Some(skew) if skew != 1.0 => ranges::skewed(spec.min as f32, spec.max as f32, skew),
+        _ => ranges::linear(spec.min as f32, spec.max as f32),
+    }
+}
+
 /// Builds the float parameter a specification describes.
 fn float_param(id: &str) -> FloatParam {
     let spec = spec(id).expect("the parameter has a specification");
-    let range = match spec.skew {
-        Some(skew) => ranges::skewed(spec.min as f32, spec.max as f32, skew),
-        None => ranges::linear(spec.min as f32, spec.max as f32),
-    };
-    let param = FloatParam::new(spec.name, spec.default as f32, range);
+    let param = FloatParam::new(spec.name, spec.default as f32, range_of(spec));
     match spec.step {
         Some(step) => param.with_step_size(step as f32),
         None => param,
@@ -1290,6 +800,7 @@ impl Default for RipplerParams {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::BTreeSet;
 
     use nice_plug_core::params::Param;
@@ -1466,8 +977,8 @@ mod tests {
 
     /// The range of every float parameter, taken from `src/PluginProcessor.cpp`.
     ///
-    /// The skew is JUCE's `NormalisableRange` skew, and the factor is the
-    /// `1/(1+skew)` that reproduces JUCE's curve.
+    /// The skew is JUCE's `NormalisableRange` skew, which is the exponent of
+    /// the curve. A skew of exactly `1.0` is a linear range.
     const FLOAT_RANGES: [(&str, f32, f32, Option<f32>); 64] = [
         ("mallet_pitch", -24.0, 24.0, None),
         ("mallet_filter", -1.0, 1.0, None),
@@ -1534,6 +1045,106 @@ mod tests {
         ("ab_split", 0.01, 1.0, Some(0.5)),
         ("gain", -24.0, 24.0, None),
     ];
+
+    /// The interval of every parameter, taken from `src/PluginProcessor.cpp`.
+    ///
+    /// A float parameter declared with JUCE's four-argument constructor has an
+    /// interval of `0.01`, even though the source does not say so: the
+    /// constructor fills it in. A parameter declared with an explicit
+    /// `NormalisableRange` keeps the interval of that range. An integer
+    /// parameter snaps to whole numbers, and a choice or a boolean is discrete
+    /// by nature and has no interval of its own.
+    const INTERVALS: [(&str, Option<f64>); 77] = [
+        ("mallet_type", None),
+        ("mallet_pitch", Some(0.01)),
+        ("mallet_filter", Some(0.01)),
+        ("mallet_mix", Some(0.01)),
+        ("mallet_res", Some(0.01)),
+        ("mallet_stiff", Some(1.0)),
+        ("mallet_ktrack", Some(0.01)),
+        ("noise_osc", Some(0.0001)),
+        ("noise_mix", Some(0.0001)),
+        ("noise_res", Some(0.0001)),
+        ("noise_filter_mode", None),
+        ("noise_filter_freq", Some(1.0)),
+        ("noise_filter_q", Some(0.01)),
+        ("noise_att", Some(1.0)),
+        ("noise_dec", Some(1.0)),
+        ("noise_sus", Some(0.01)),
+        ("noise_rel", Some(1.0)),
+        ("noise_att_ten", Some(0.01)),
+        ("noise_dec_ten", Some(0.01)),
+        ("noise_rel_ten", Some(0.01)),
+        ("a_on", None),
+        ("a_model", None),
+        ("a_partials", None),
+        ("a_decay", Some(0.01)),
+        ("a_damp", Some(0.01)),
+        ("a_tone", Some(0.01)),
+        ("a_hit", Some(0.01)),
+        ("a_rel", Some(0.01)),
+        ("a_inharm", Some(0.0001)),
+        ("a_ratio", Some(0.01)),
+        ("a_cut", Some(0.01)),
+        ("a_radius", Some(0.01)),
+        ("a_coarse", Some(1.0)),
+        ("a_fine", Some(1.0)),
+        ("b_on", None),
+        ("b_model", None),
+        ("b_partials", None),
+        ("b_decay", Some(0.01)),
+        ("b_damp", Some(0.01)),
+        ("b_tone", Some(0.01)),
+        ("b_hit", Some(0.01)),
+        ("b_rel", Some(0.01)),
+        ("b_inharm", Some(0.0001)),
+        ("b_ratio", Some(0.01)),
+        ("b_cut", Some(0.01)),
+        ("b_radius", Some(0.01)),
+        ("b_coarse", Some(1.0)),
+        ("b_fine", Some(1.0)),
+        ("vel_mallet_mix", Some(0.01)),
+        ("vel_mallet_res", Some(0.01)),
+        ("vel_mallet_stiff", Some(0.01)),
+        ("vel_noise_mix", Some(0.01)),
+        ("vel_noise_res", Some(0.01)),
+        ("vel_noise_freq", Some(0.01)),
+        ("vel_noise_att", Some(0.01)),
+        ("vel_noise_dec", Some(0.01)),
+        ("vel_noise_sus", Some(0.01)),
+        ("vel_noise_rel", Some(0.01)),
+        ("vel_noise_q", Some(0.01)),
+        ("vel_a_decay", Some(0.01)),
+        ("vel_a_hit", Some(0.01)),
+        ("vel_a_inharm", Some(0.01)),
+        ("vel_a_damp", Some(0.01)),
+        ("vel_a_tone", Some(0.01)),
+        ("vel_b_decay", Some(0.01)),
+        ("vel_b_hit", Some(0.01)),
+        ("vel_b_inharm", Some(0.01)),
+        ("vel_b_damp", Some(0.01)),
+        ("vel_b_tone", Some(0.01)),
+        ("couple", None),
+        ("ab_mix", Some(0.01)),
+        ("ab_split", Some(0.001)),
+        ("gain", Some(0.01)),
+        ("bend_range", Some(1.0)),
+        ("stereoizer", None),
+        ("reuse_voices", None),
+        ("fadeout_repeats", None),
+    ];
+
+    /// A setter that records the parameters it was given.
+    #[derive(Default)]
+    struct RecordingSetter {
+        seen: RefCell<Vec<String>>,
+    }
+
+    impl RecordingSetter {
+        fn set_parameter<P: Param>(&self, param: &P, _value: P::Plain) {
+            self.seen.borrow_mut().push(param.name().to_string());
+        }
+    }
 
     /// The default value of every parameter of a parameter set.
     fn defaults(params: &RipplerParams) -> Vec<(&'static str, f64)> {
@@ -1978,16 +1589,59 @@ mod tests {
             assert_eq!(actual_max, *max, "{id} has the wrong maximum");
             match (actual_factor, skew) {
                 (None, None) => {}
+                // A skew of exactly one is a linear range, not a skew.
+                (None, Some(1.0)) => {}
                 (Some(factor), Some(skew)) => {
-                    let expected_factor = 1.0 / (1.0 + skew);
                     assert!(
-                        (factor - expected_factor).abs() < 1e-12,
-                        "{id} has the factor {factor}, not {expected_factor}"
+                        (factor - skew).abs() < 1e-12,
+                        "{id} has the factor {factor}, not {skew}"
                     );
                 }
                 (actual, expected) => panic!("{id} has the skew {actual:?}, not {expected:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_skew_of_one_is_a_linear_range() {
+        let params = RipplerParams::default();
+        for (range, middle) in [
+            (params.resonator_a.a_coarse.range(), 0.0f32),
+            (params.resonator_a.a_fine.range(), 0.0),
+            (params.resonator_b.b_coarse.range(), 0.0),
+            (params.resonator_b.b_fine.range(), 0.0),
+            (params.noise.noise_osc.range(), 0.5),
+        ] {
+            assert!(
+                matches!(range, FloatRange::Linear { .. }),
+                "{range:?} is not linear"
+            );
+            assert_eq!(range.normalize(middle), 0.5, "{range:?} is not linear");
+        }
+    }
+
+    #[test]
+    fn a_skew_is_the_exponent_of_the_curve() {
+        let params = RipplerParams::default();
+        // JUCE normalises as `proportion^skew`, so the middle of a skewed
+        // range is not in the middle of the knob.
+        let decay = params.resonator_a.a_decay.range();
+        assert!((decay.normalize(50.005) - 0.5f32.powf(0.2)).abs() < 1e-6);
+        assert!((decay.normalize(50.005) - 0.5f32.powf(1.0 / 1.2)).abs() > 1e-2);
+    }
+
+    #[test]
+    fn the_intervals_match_the_juce_build() {
+        assert_eq!(INTERVALS.len(), SPECS.len());
+        for (id, expected) in INTERVALS {
+            let spec = spec(id).expect("the parameter has a specification");
+            assert_eq!(spec.step, expected, "{id} has the wrong interval");
+        }
+    }
+
+    #[test]
+    fn every_parameter_holds_the_plain_type_the_table_says() {
+        check_plain_types(&RipplerParams::default());
     }
 
     #[test]
@@ -2001,5 +1655,81 @@ mod tests {
                 spec.id
             );
         }
+    }
+
+    #[test]
+    fn every_parameter_is_reachable_through_the_mapping() {
+        let params = RipplerParams::default();
+        let setter = RecordingSetter::default();
+
+        for spec in SPECS {
+            let before = setter.seen.borrow().len();
+            assert!(
+                apply_parameter!(&params, &setter, spec.id, 0.0),
+                "{} is not reachable through the mapping",
+                spec.id
+            );
+            let seen = setter.seen.borrow();
+            assert_eq!(seen.len(), before + 1, "{} was not set", spec.id);
+            assert_eq!(
+                seen[before], spec.name,
+                "{} reaches the wrong parameter",
+                spec.id
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_identifier_is_rejected() {
+        let params = RipplerParams::default();
+        let setter = RecordingSetter::default();
+
+        assert!(!apply_parameter!(&params, &setter, "not_a_parameter", 1.0));
+        assert!(setter.seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_mapping_hands_over_the_typed_parameter() {
+        let params = RipplerParams::default();
+        let names = RefCell::new(Vec::new());
+
+        macro_rules! record {
+            ($param:expr, $value:expr) => {
+                names.borrow_mut().push($param.name().to_string());
+            };
+        }
+
+        assert!(with_parameter!(&params, "a_decay", record, 1.0));
+        assert_eq!(names.borrow().as_slice(), ["A Decay"]);
+        assert!(!with_parameter!(&params, "not_a_parameter", record, 1.0));
+        assert_eq!(names.borrow().len(), 1);
+    }
+
+    #[test]
+    fn the_mapping_converts_the_legacy_values() {
+        let params = RipplerParams::default();
+
+        assert_eq!(
+            LegacyParameter::legacy_value(&params.resonator_a.a_decay, 1.5),
+            1.5
+        );
+        assert_eq!(LegacyParameter::legacy_value(&params.bend_range, 2.6), 3);
+        assert!(LegacyParameter::legacy_value(&params.resonator_a.a_on, 1.0));
+        assert!(!LegacyParameter::legacy_value(
+            &params.resonator_b.b_on,
+            0.0
+        ));
+        assert_eq!(
+            LegacyParameter::legacy_value(&params.couple, 1.0),
+            Coupling::Series
+        );
+        assert_eq!(
+            LegacyParameter::legacy_value(&params.couple, 9.0),
+            Coupling::Series
+        );
+        assert_eq!(
+            LegacyParameter::legacy_value(&params.couple, -1.0),
+            Coupling::Parallel
+        );
     }
 }

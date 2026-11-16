@@ -70,13 +70,13 @@ fn run(arguments: &[String]) -> Result<(), String> {
 /// Converts one legacy patch.
 fn convert_one(input: &Path, output: Option<&Path>) -> Result<(), String> {
     let patch = read_patch(input)?;
+    let json = write_patch(&patch).map_err(|error| error.to_string())?;
 
     match output {
         Some(path) => {
-            std::fs::write(path, write_patch(&patch))
-                .map_err(|error| format!("{}: {error}", path.display()))?;
+            std::fs::write(path, json).map_err(|error| format!("{}: {error}", path.display()))?;
         }
-        None => println!("{}", write_patch(&patch)),
+        None => println!("{json}"),
     }
 
     Ok(())
@@ -101,6 +101,7 @@ fn convert_presets(directory: &Path, output: Option<&Path>) -> Result<(), String
 
     for path in &paths {
         let patch = read_patch(path)?;
+        let json = write_patch(&patch).map_err(|error| error.to_string())?;
         let name = path
             .file_stem()
             .map(|stem| format!("{}.ripx", stem.to_string_lossy()))
@@ -109,10 +110,10 @@ fn convert_presets(directory: &Path, output: Option<&Path>) -> Result<(), String
         match output {
             Some(directory) => {
                 let target = directory.join(name);
-                std::fs::write(&target, write_patch(&patch))
+                std::fs::write(&target, json)
                     .map_err(|error| format!("{}: {error}", target.display()))?;
             }
-            None => println!("{}", write_patch(&patch)),
+            None => println!("{json}"),
         }
     }
 
@@ -123,8 +124,7 @@ fn convert_presets(directory: &Path, output: Option<&Path>) -> Result<(), String
 fn read_patch(path: &Path) -> Result<Patch, String> {
     let xml =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let legacy = read_legacy_patch(&xml)
-        .ok_or_else(|| format!("{} is not a legacy patch", path.display()))?;
+    let legacy = read_legacy_patch(&xml).map_err(|error| format!("{}: {error}", path.display()))?;
     let patch = convert_legacy_patch(&legacy);
 
     if let Some(sample) = &patch.user_sample {

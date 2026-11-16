@@ -14,17 +14,26 @@
 //! holds its plain value, a choice parameter its index and a boolean `0.0` or
 //! `1.0`. The reader therefore does not apply the skew.
 //!
-//! Two things make the reader more than a plain XML walk:
+//! Three things make the reader more than a plain XML walk:
 //!
-//! - A `<PARAM>` without a `value` attribute holds **zero**, because JUCE's
-//!   `replaceState` reads a missing property as `var()`, which converts to
-//!   `0.0f`. That is not the same as "keep the default", and it matters for
-//!   every parameter whose default is not zero.
-//! - The `a_cut` and `b_cut` parameters need the historical migration: the
-//!   presets hold hertz values on the old scale, and the current parameter is
-//!   a position on a logarithmic scale from 20 Hz to 20 kHz.
+//! - A `<PARAM>` without a `value` attribute holds the parameter's **default**,
+//!   because JUCE reads a missing property as the default:
+//!
+//!   ```cpp
+//!   p->setDenormalisedValue (p->tree.getProperty (valuePropertyID, p->getDenormalisedDefaultValue()));
+//!   ```
+//!
+//! - A value that is not a finite number is refused. JUCE would hold it, but
+//!   it would poison every patch written from it.
+//! - A document that is truncated or malformed is refused as well, rather than
+//!   read as a patch with only some of its values.
+//!
+//! The reader keeps the values as the legacy state holds them. The migration
+//! of the `a_cut` and `b_cut` parameters and the snapping to the parameters'
+//! step sizes happen in [`to_parameter_values`].
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -35,6 +44,11 @@ use crate::params::{ParameterKind, spec};
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LegacyPatch {
     /// The parameter values, by legacy identifier.
+    ///
+    /// The values are the plain ones the legacy state holds: a float
+    /// parameter its value, a choice parameter its index and a boolean `0.0`
+    /// or `1.0`. They are neither migrated nor snapped; [`to_parameter_values`]
+    /// does that.
     pub values: BTreeMap<String, f64>,
     /// The base64-encoded user sample, if the patch carried one.
     pub user_sample: Option<String>,
@@ -42,17 +56,45 @@ pub struct LegacyPatch {
     pub current_program: Option<i32>,
 }
 
+/// What can go wrong when reading a legacy patch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LegacyError {
+    /// The document is not well formed, or it was cut short.
+    Malformed(String),
+    /// The document is not a `PARAMETERS` tree.
+    NotAParametersTree,
+    /// A parameter's value is a number that is not finite.
+    NotFinite(String),
+}
+
+impl fmt::Display for LegacyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LegacyError::Malformed(reason) => {
+                write!(f, "the patch is not a well formed document: {reason}")
+            }
+            LegacyError::NotAParametersTree => write!(f, "the patch is not a parameters tree"),
+            LegacyError::NotFinite(id) => {
+                write!(f, "the parameter {id} has a value that is not a number")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LegacyError {}
+
 /// Reads a legacy JUCE patch.
 ///
-/// Returns `None` if the XML is not a `PARAMETERS` tree.
-pub fn read_legacy_patch(xml: &str) -> Option<LegacyPatch> {
+/// The patch is refused when it is not a `PARAMETERS` tree, when it is
+/// truncated or malformed, and when one of its values is not a finite number.
+pub fn read_legacy_patch(xml: &str) -> Result<LegacyPatch, LegacyError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
     let mut buffer = Vec::new();
     let mut patch = LegacyPatch::default();
-    let mut is_parameters = false;
     let mut seen_root = false;
+    let mut closed_root = false;
 
     loop {
         match reader.read_event_into(&mut buffer) {
@@ -60,9 +102,8 @@ pub fn read_legacy_patch(xml: &str) -> Option<LegacyPatch> {
                 if !seen_root {
                     seen_root = true;
                     if event.name().as_ref() != "PARAMETERS" {
-                        return None;
+                        return Err(LegacyError::NotAParametersTree);
                     }
-                    is_parameters = true;
                     read_root_attributes(&event, &mut patch);
                 }
             }
@@ -70,21 +111,21 @@ pub fn read_legacy_patch(xml: &str) -> Option<LegacyPatch> {
                 if !seen_root {
                     seen_root = true;
                     if event.name().as_ref() != "PARAMETERS" {
-                        return None;
+                        return Err(LegacyError::NotAParametersTree);
                     }
-                    is_parameters = true;
                     read_root_attributes(&event, &mut patch);
-                } else if is_parameters && event.name().as_ref() == "PARAM" {
-                    read_parameter(&event, &mut patch);
+                    closed_root = true;
+                } else if event.name().as_ref() == "PARAM" {
+                    read_parameter(&event, &mut patch)?;
                 }
             }
             Ok(Event::End(event)) => {
                 if event.name().as_ref() == "PARAMETERS" {
-                    is_parameters = false;
+                    closed_root = true;
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => return None,
+            Err(error) => return Err(LegacyError::Malformed(error.to_string())),
             _ => {}
         }
 
@@ -92,10 +133,16 @@ pub fn read_legacy_patch(xml: &str) -> Option<LegacyPatch> {
     }
 
     if !seen_root {
-        return None;
+        return Err(LegacyError::NotAParametersTree);
     }
 
-    Some(patch)
+    if !closed_root {
+        return Err(LegacyError::Malformed(String::from(
+            "the document ends before the parameters tree does",
+        )));
+    }
+
+    Ok(patch)
 }
 
 /// Reads the attributes of the root element.
@@ -112,31 +159,36 @@ fn read_root_attributes(event: &BytesStart, patch: &mut LegacyPatch) {
 }
 
 /// Reads one `<PARAM>` element.
-fn read_parameter(event: &BytesStart, patch: &mut LegacyPatch) {
+fn read_parameter(event: &BytesStart, patch: &mut LegacyPatch) -> Result<(), LegacyError> {
     let mut id = None;
     let mut value = None;
 
     for (key, attribute) in attributes(event) {
         match key.as_str() {
             "id" => id = Some(attribute),
-            // A missing value is zero, not the default.
+            // A value that is not a number at all is zero, the way JUCE's
+            // `var` reads it. A value that is a number but not a finite one is
+            // refused below.
             "value" => value = Some(attribute.parse::<f64>().unwrap_or(0.0)),
             _ => {}
         }
     }
 
-    let Some(id) = id else { return };
-    if spec(&id).is_none() {
-        return;
-    }
-
-    let value = value.unwrap_or(0.0);
-    let value = match id.as_str() {
-        "a_cut" | "b_cut" => migrate_cut(value),
-        _ => value,
+    let Some(id) = id else { return Ok(()) };
+    let Some(specification) = spec(&id) else {
+        // An identifier the plugin does not know is simply ignored.
+        return Ok(());
     };
 
+    // A missing value is the parameter's default, the way JUCE reads it.
+    let value = value.unwrap_or(specification.default);
+
+    if !value.is_finite() {
+        return Err(LegacyError::NotFinite(id));
+    }
+
     patch.values.insert(id, value);
+    Ok(())
 }
 
 /// The attributes of an element, by name.
@@ -173,9 +225,8 @@ pub fn migrate_cut(value: f64) -> f64 {
 
 /// Converts a legacy patch into plain parameter values.
 ///
-/// Applies the `a_cut` and `b_cut` migration, and snaps each value to its
-/// parameter's step size the way JUCE's `snapToLegalValue` does. A value with
-/// no step size is left exactly as it is.
+/// The `a_cut` and `b_cut` migration is applied, and every value is snapped
+/// to its parameter's step size the way JUCE's `snapToLegalValue` does.
 pub fn to_parameter_values(patch: &LegacyPatch) -> BTreeMap<String, f64> {
     let mut values = BTreeMap::new();
 
@@ -187,9 +238,20 @@ pub fn to_parameter_values(patch: &LegacyPatch) -> BTreeMap<String, f64> {
             _ => *value,
         };
 
-        let value = match (spec.kind, spec.step) {
-            (ParameterKind::Float, Some(step)) => snap_to_step(value, spec.min, spec.max, step),
-            _ => value,
+        let value = match spec.kind {
+            ParameterKind::Float => match spec.step {
+                Some(step) => snap_to_step(value, spec.min, spec.max, step),
+                None => value.clamp(spec.min, spec.max),
+            },
+            ParameterKind::Int => snap_to_step(value, spec.min, spec.max, 1.0),
+            ParameterKind::Bool => {
+                if value >= 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            ParameterKind::Choice => value.round().clamp(spec.min, spec.max),
         };
 
         values.insert(id.clone(), value);
@@ -201,16 +263,32 @@ pub fn to_parameter_values(patch: &LegacyPatch) -> BTreeMap<String, f64> {
 /// Snaps a value to a step size the way JUCE's `snapToLegalValue` does.
 ///
 /// The step is counted from the bottom of the range, and the result is
-/// clamped to the range.
+/// clamped to the range. The result is rounded to the number of decimals the
+/// step implies, so that a value like `-0.6200000047683716` comes out as
+/// `-0.62` rather than as the difference of two rounded numbers.
 fn snap_to_step(value: f64, min: f64, max: f64, step: f64) -> f64 {
-    let snapped = min + step * ((value - min) / step + 0.5).floor();
-    if snapped <= min || max <= min {
-        min
-    } else if snapped >= max {
-        max
-    } else {
-        snapped
+    if step <= 0.0 {
+        return value.clamp(min, max);
     }
+
+    let snapped = min + step * ((value - min) / step + 0.5).floor();
+    let snapped = snapped.clamp(min, max);
+
+    let scale = 10f64.powi(decimals_of(step) as i32);
+    (snapped * scale).round() / scale
+}
+
+/// The number of decimals a step size implies.
+fn decimals_of(step: f64) -> u32 {
+    let mut decimals = 0;
+    let mut scaled = step;
+
+    while (scaled - scaled.round()).abs() > 1e-9 && decimals < 12 {
+        scaled *= 10.0;
+        decimals += 1;
+    }
+
+    decimals
 }
 
 #[cfg(test)]
@@ -235,11 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn a_parameter_without_a_value_reads_as_zero() {
-        let patch = read_legacy_patch("<PARAMETERS><PARAM id=\"a_coarse\"/></PARAMETERS>")
+    fn a_parameter_without_a_value_reads_as_its_default() {
+        let patch = read_legacy_patch("<PARAMETERS><PARAM id=\"a_decay\"/></PARAMETERS>")
             .expect("the patch is a parameters tree");
-        assert_eq!(patch.values["a_coarse"], 0.0);
+        assert_eq!(patch.values["a_decay"], 1.0);
         assert_eq!(patch.values.len(), 1);
+
+        let patch = read_legacy_patch("<PARAMETERS><PARAM id=\"mallet_res\"/></PARAMETERS>")
+            .expect("the patch is a parameters tree");
+        assert_eq!(patch.values["mallet_res"], 0.8);
     }
 
     #[test]
@@ -265,8 +347,44 @@ mod tests {
 
     #[test]
     fn a_tree_that_is_not_a_parameters_tree_is_rejected() {
-        assert!(read_legacy_patch("<OTHER/>").is_none());
-        assert!(read_legacy_patch("not xml at all").is_none());
+        assert_eq!(
+            read_legacy_patch("<OTHER/>"),
+            Err(LegacyError::NotAParametersTree)
+        );
+        assert_eq!(
+            read_legacy_patch("not xml at all"),
+            Err(LegacyError::NotAParametersTree)
+        );
+    }
+
+    #[test]
+    fn a_truncated_patch_is_rejected() {
+        let truncated = "<PARAMETERS><PARAM id=\"a_decay\" value=\"1.0\"/>";
+        assert!(matches!(
+            read_legacy_patch(truncated),
+            Err(LegacyError::Malformed(_))
+        ));
+
+        let truncated = "<PARAMETERS><PARAM id=\"a_decay\" value=\"1.0\"";
+        assert!(matches!(
+            read_legacy_patch(truncated),
+            Err(LegacyError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_number_is_rejected() {
+        let patch = "<PARAMETERS><PARAM id=\"a_decay\" value=\"nan\"/></PARAMETERS>";
+        assert_eq!(
+            read_legacy_patch(patch),
+            Err(LegacyError::NotFinite("a_decay".to_string()))
+        );
+
+        let patch = "<PARAMETERS><PARAM id=\"a_decay\" value=\"inf\"/></PARAMETERS>";
+        assert_eq!(
+            read_legacy_patch(patch),
+            Err(LegacyError::NotFinite("a_decay".to_string()))
+        );
     }
 
     #[test]
@@ -277,8 +395,32 @@ mod tests {
         .expect("the patch is a parameters tree");
 
         let expected = (372.0f64 / 20.0).ln() / (20000.0f64 / 20.0).ln();
-        assert!((patch.values["a_cut"] - expected).abs() < 1e-12);
-        assert!((patch.values["b_cut"] - 0.0).abs() < 1e-12);
+        // The reader keeps the values as the legacy state holds them: the
+        // migration belongs to the conversion.
+        assert_eq!(patch.values["a_cut"], 372.0);
+        assert_eq!(patch.values["b_cut"], 20.0);
+
+        let values = to_parameter_values(&patch);
+        assert!((values["a_cut"] - expected).abs() < 0.01);
+        assert!((values["b_cut"] - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_cut_migration_happens_once() {
+        let patch =
+            read_legacy_patch("<PARAMETERS><PARAM id=\"a_cut\" value=\"372.0\"/></PARAMETERS>")
+                .expect("the patch is a parameters tree");
+
+        let values = to_parameter_values(&patch);
+        let expected = (372.0f64 / 20.0).ln() / (20000.0f64 / 20.0).ln();
+        assert!((values["a_cut"] - expected).abs() < 0.01);
+
+        // The migration is not applied a second time.
+        let again = to_parameter_values(&LegacyPatch {
+            values: BTreeMap::from([("a_cut".to_string(), values["a_cut"])]),
+            ..Default::default()
+        });
+        assert_eq!(again["a_cut"], values["a_cut"]);
     }
 
     #[test]
@@ -287,6 +429,9 @@ mod tests {
             read_legacy_patch("<PARAMETERS><PARAM id=\"a_cut\" value=\"-0.5\"/></PARAMETERS>")
                 .expect("the patch is a parameters tree");
         assert_eq!(patch.values["a_cut"], -0.5);
+
+        let values = to_parameter_values(&patch);
+        assert_eq!(values["a_cut"], -0.5);
     }
 
     #[test]
@@ -310,5 +455,51 @@ mod tests {
         let values = to_parameter_values(&patch);
         assert_eq!(values["a_decay"], 10.78);
         assert_eq!(values["a_cut"], 0.5);
+    }
+
+    #[test]
+    fn the_implicit_interval_of_the_juce_build_is_applied() {
+        // JUCE's four-argument constructor gives every one of these an
+        // interval of `0.01`.
+        let patch = read_legacy_patch(
+            "<PARAMETERS><PARAM id=\"a_damp\" value=\"-0.6200000047683716\"/><PARAM id=\"gain\" value=\"6.239999771118164\"/><PARAM id=\"b_hit\" value=\"0.2599999904632568\"/></PARAMETERS>",
+        )
+        .expect("the patch is a parameters tree");
+
+        let values = to_parameter_values(&patch);
+        assert_eq!(values["a_damp"], -0.62);
+        assert_eq!(values["gain"], 6.24);
+        assert_eq!(values["b_hit"], 0.26);
+    }
+
+    #[test]
+    fn a_choice_parameter_is_its_index() {
+        let patch = read_legacy_patch(
+            "<PARAMETERS><PARAM id=\"a_model\" value=\"3.0\"/><PARAM id=\"couple\" value=\"1.0\"/></PARAMETERS>",
+        )
+        .expect("the patch is a parameters tree");
+        let values = to_parameter_values(&patch);
+        assert_eq!(values["a_model"], 3.0);
+        assert_eq!(values["couple"], 1.0);
+    }
+
+    #[test]
+    fn a_boolean_parameter_is_zero_or_one() {
+        let patch = read_legacy_patch(
+            "<PARAMETERS><PARAM id=\"a_on\" value=\"1.0\"/><PARAM id=\"b_on\" value=\"0.0\"/></PARAMETERS>",
+        )
+        .expect("the patch is a parameters tree");
+        let values = to_parameter_values(&patch);
+        assert_eq!(values["a_on"], 1.0);
+        assert_eq!(values["b_on"], 0.0);
+    }
+
+    #[test]
+    fn an_integer_parameter_is_a_whole_number() {
+        let patch =
+            read_legacy_patch("<PARAMETERS><PARAM id=\"bend_range\" value=\"7.0\"/></PARAMETERS>")
+                .expect("the patch is a parameters tree");
+        let values = to_parameter_values(&patch);
+        assert_eq!(values["bend_range"], 7.0);
     }
 }

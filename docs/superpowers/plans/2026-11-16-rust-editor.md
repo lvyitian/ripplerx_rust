@@ -86,6 +86,27 @@ arrangement, not the pixel positions — egui lays out with a grid.
 
 ---
 
+## Decisions taken while implementing
+
+- **The theme, the UI scale and the polyphony live in a JSON settings file** in
+  the user's config directory, mirroring the JUCE build's
+  `loadSettings`/`saveSettings`. They are **not** `#[persist]` fields on the
+  parameter struct, because `#[persist]` fields cannot be written through
+  `ParamSetter`, so the editor could not toggle the theme. The polyphony is
+  shared with the audio thread through an `Arc<AtomicUsize>`, since the audio
+  thread must not take a lock.
+- **The images are embedded** with `include_bytes!` and decoded with the `image`
+  crate, and the Ubuntu font is embedded and installed as egui's proportional
+  font. Drawing substitutes would have looked wrong.
+- **The MIDI keyboard is left out.** nice-plug offers no way for an editor to
+  send a note to the host, so the host's own keyboard is used instead.
+- **The file dialogs use `rfd`.** Note that `rfd` needs Rust 1.92, so the
+  workspace's declared MSRV of 1.88 is optimistic.
+- **The knob's mouse area is the circle** rather than the whole 70 × 75 cell, so
+  that the tension control in the corner is not swallowed by the knob's drag.
+
+---
+
 ### Task 1: The editor plumbing
 
 **Files:**
@@ -263,6 +284,9 @@ The control point is placed at the parameter's value, normalised from −1…1 t
 - Inverted: the curve runs from the top-left to the bottom-right, with the
   control point at `(left + width * (1 - v), bottom - height * (1 - v))`.
 
+  Check the direction against the C++ rather than assuming: the inverted case
+  moves the control point the other way.
+
 The stroke is one pixel wide, in the neutral-light colour.
 
 The interaction is a vertical drag: the change is `change.x - change.y`, divided
@@ -300,8 +324,11 @@ reads the processor's RMS value. In this port the value comes from the plugin
 through an `Arc<AtomicF32>`, and the editor asks for a repaint when it changes.
 
 Read `src/ui/Meter.cpp` for how the bulbs light up — the level thresholds and
-the colours — and reproduce them. The meter is drawn with the active colour
-for the lit bulbs and the neutral-light colour for the unlit ones.
+the colours — and reproduce them.
+
+**The lit bulbs use a green → yellow → red gradient**, not the active and
+neutral-light colours, and the unlit bulbs are dark grey and black. The plan's
+first draft had this wrong; the C++ wins.
 
 The plugin already computes an RMS value; expose it through the shared atomic
 rather than computing it in the editor.
@@ -315,7 +342,9 @@ default and the **fine** one when the coarse value is at its limit, and it
 snaps the coarse value to whole semitones. It shows the current pitch in
 semitones.
 
-Read the C++ for the exact switching rule and reproduce it.
+**The C++ switches between coarse and fine by which half of the control you
+click**, not by reaching the coarse limit. Read the C++ for the exact rule and
+reproduce it.
 
 - [ ] **Step 3: Write the tests**
 

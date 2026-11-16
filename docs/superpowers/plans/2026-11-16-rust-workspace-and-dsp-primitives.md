@@ -1,0 +1,1586 @@
+# Rust Workspace and DSP Primitives — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Stand up the Cargo workspace for the Rust port and port RipplerX's seven DSP primitive modules (lookup table, RNG, biquad, envelope, comb stereoizer, limiter) to tested Rust.
+
+**Architecture:** Three crates under `rust/` — `rippler-dsp` (pure DSP, no framework dependencies), `rippler-params` (compatibility surface), `rippler-plugin` (nice-plug shell). This plan builds the workspace skeleton and completes `rippler-dsp`'s primitive layer; every module is a direct port of its C++ counterpart with analytic tests asserting against theory.
+
+**Tech Stack:** Rust 2024 edition (MSRV 1.88), Cargo workspace, `cargo test`. No third-party dependencies in `rippler-dsp` yet.
+
+**Design doc:** `docs/superpowers/specs/2026-11-16-rust-nice-plug-migration-design.md`
+
+---
+
+## Plan roadmap
+
+The design doc spans six separable subsystems. Each gets its own plan; each plan ends with working, testable software.
+
+| # | Plan | Scope | Depends on |
+|---|---|---|---|
+| 1 | **This plan** — Rust workspace and DSP primitives | Workspace, `lut`, `rng`, `filter`, `envelope`, `comb`, `limiter` | — |
+| 2 | Modal core | `models`, `partial`, `resonator`, `waveguide` | 1 |
+| 3 | Excitation and voice | `mallet`, `sampler`, `noise`, `voice` | 1, 2 |
+| 4 | Parameters and compatibility | `rippler-params`: params, ranges, enums, legacy XML reader, `rippler-import` CLI | 1, 3 |
+| 5 | Plugin shell | `rippler-plugin`: nice-plug `Plugin`, MIDI, voice allocation, VST3/CLAP export, bundling, CI | 4 |
+| 6 | Editor | egui editor: knob, tension, meter, pitch, keyboard, menus, themes | 5 |
+
+Plan 5 also carries the two verification items from the design doc: recovering the existing VST3 class ID from a reference JUCE build, and confirming the sidechain input bus is exposed in Reaper and a CLAP host.
+
+## Reference material
+
+The C++ source being ported lives in `src/dsp/` at the repository root and stays untouched throughout this plan. Consult it when a step says "compare against the C++".
+
+- `src/dsp/Utils.h` — `Utils` (freq/dB helpers) and `LookupTable`
+- `src/dsp/Filter.{h,cpp}` — RBJ biquad, direct form I
+- `src/dsp/Envelope.{h,cpp}` — ADSR with tension (Envlib / zenvelib port)
+- `src/dsp/Comb.h` — comb-filter stereoizer
+- `src/dsp/Limiter.h` — brickwall limiter (FairlyChildish, by Thomas Scott Stillwell)
+- `src/dsp/Noise.cpp` — the only caller of `std::rand()`, mapped in Task 3
+
+## Conventions
+
+- Internal arithmetic is `f64`, matching the C++.
+- Every module carries a doc comment stating which C++ file it ports.
+- Tests live in a `#[cfg(test)] mod tests` block at the bottom of the module file.
+- Module-private helpers are plain `fn`, not `pub`, unless a later plan needs them.
+- Commits use conventional prefixes (`feat:`, `test:`, `chore:`).
+
+---
+
+### Task 1: Cargo workspace and crate skeletons
+
+**Files:**
+- Create: `rust/Cargo.toml`
+- Create: `rust/crates/rippler-dsp/Cargo.toml`
+- Create: `rust/crates/rippler-dsp/src/lib.rs`
+- Create: `rust/crates/rippler-params/Cargo.toml`
+- Create: `rust/crates/rippler-params/src/lib.rs`
+- Create: `rust/crates/rippler-plugin/Cargo.toml`
+- Create: `rust/crates/rippler-plugin/src/lib.rs`
+- Modify: `.gitignore`
+
+- [ ] **Step 1: Create the workspace manifest**
+
+Create `rust/Cargo.toml`:
+
+```toml
+[workspace]
+resolver = "3"
+members = [
+    "crates/rippler-dsp",
+    "crates/rippler-params",
+    "crates/rippler-plugin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/tiagolr/ripplerx"
+```
+
+The `[workspace.dependencies]` section is added when the first cross-crate
+dependency appears. Cargo warns about declared but unused workspace
+dependencies, so adding it here would break the clean build this plan ends on.
+
+- [ ] **Step 2: Create `rippler-dsp`**
+
+Create `rust/crates/rippler-dsp/Cargo.toml`:
+
+```toml
+[package]
+name = "rippler-dsp"
+description = "Pure DSP core for the RipplerX physical modelling synthesiser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+```
+
+Create `rust/crates/rippler-dsp/src/lib.rs`:
+
+```rust
+//! Pure DSP core for the RipplerX physical modelling synthesiser.
+//!
+//! This crate has no dependency on any plugin framework. Everything here is
+//! portable, testable in isolation, and free of allocation on the audio path.
+
+pub mod comb;
+pub mod envelope;
+pub mod filter;
+pub mod limiter;
+pub mod lut;
+pub mod rng;
+```
+
+- [ ] **Step 3: Create `rippler-params`**
+
+Create `rust/crates/rippler-params/Cargo.toml`:
+
+```toml
+[package]
+name = "rippler-params"
+description = "Parameter definitions and legacy state compatibility for RipplerX"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+```
+
+The crates start with no cross-crate dependencies. Rust warns about declared but
+unused dependencies, so `rippler-params` gains `rippler-dsp` in the plan that
+needs it, and `rippler-plugin` gains both.
+
+Create `rust/crates/rippler-params/src/lib.rs`:
+
+```rust
+//! Parameter definitions and legacy state compatibility for RipplerX.
+//!
+//! Everything that has to stay compatible with the JUCE implementation lives
+//! here: parameter identifiers, value ranges, and the legacy XML reader.
+```
+
+- [ ] **Step 4: Create `rippler-plugin`**
+
+Create `rust/crates/rippler-plugin/Cargo.toml`:
+
+```toml
+[package]
+name = "rippler-plugin"
+description = "The RipplerX audio plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+```
+
+`crate-type` includes both `cdylib` (what the host loads) and `lib` (so the crate can be unit tested and linked by the CLI).
+
+Create `rust/crates/rippler-plugin/src/lib.rs`:
+
+```rust
+//! The RipplerX audio plugin.
+```
+
+- [ ] **Step 5: Ignore build output**
+
+Append to `.gitignore`:
+
+```
+# Rust
+rust/target/
+```
+
+- [ ] **Step 6: Verify the workspace builds**
+
+Run: `cd rust && cargo build`
+Expected: compiles all three crates with no errors.
+
+Run: `cd rust && cargo test`
+Expected: `running 0 tests` for each crate, no failures.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add rust .gitignore
+git commit -m "chore: scaffold the Rust workspace for the RipplerX port"
+```
+
+---
+
+### Task 2: Lookup table
+
+**Files:**
+- Create: `rust/crates/rippler-dsp/src/lut.rs`
+- Modify: `rust/crates/rippler-dsp/src/lib.rs` (already declares `pub mod lut;`)
+
+Port of `LookupTable` in `src/dsp/Utils.h`. The C++ version is a re-implementation of JUCE's `LookupTableTransform` with cubic interpolation added.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `rust/crates/rippler-dsp/src/lut.rs`:
+
+```rust
+//! Lookup table with linear and cubic interpolation.
+//!
+//! Port of `LookupTable` in `src/dsp/Utils.h`.
+
+/// A table of precomputed values sampled evenly across `[min, max]`.
+#[derive(Clone, Debug)]
+pub struct LookupTable {
+    values: Vec<f64>,
+    min: f64,
+    max: f64,
+    scaler: f64,
+    offset: f64,
+}
+
+impl LookupTable {
+    /// Builds a table by sampling `f` at `size` evenly spaced points across
+    /// `[min, max]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max <= min` or `size < 2`.
+    pub fn new<F: Fn(f64) -> f64>(f: F, min: f64, max: f64, size: usize) -> Self {
+        assert!(max > min, "max must be greater than min");
+        assert!(size >= 2, "size must be at least 2");
+
+        let mut values = Vec::with_capacity(size);
+        for i in 0..size {
+            let x = i as f64 / (size - 1) as f64;
+            let mapped_x = (min + x * (max - min)).clamp(min, max);
+            values.push(f(mapped_x));
+        }
+
+        let scaler = (size - 1) as f64 / (max - min);
+        let offset = -min * scaler;
+
+        Self {
+            values,
+            min,
+            max,
+            scaler,
+            offset,
+        }
+    }
+
+    /// Linear interpolation. `input` is clamped to the table's range.
+    pub fn get(&self, input: f64) -> f64 {
+        let input = input.clamp(self.min, self.max);
+        let normalized_index = input * self.scaler + self.offset;
+        let index = normalized_index.floor() as usize;
+
+        if index >= self.values.len() - 1 {
+            return self.values[self.values.len() - 1];
+        }
+
+        let frac = normalized_index - index as f64;
+        self.values[index] + frac * (self.values[index + 1] - self.values[index])
+    }
+
+    /// Cubic interpolation over the four samples surrounding `input`.
+    ///
+    /// The sample indices are clamped at both ends, matching the C++ which
+    /// clamps `i0` and `i2`/`i3` but could index past the end of the vector.
+    pub fn cubic(&self, input: f64) -> f64 {
+        let input = input.clamp(self.min, self.max);
+        let index = input * self.scaler + self.offset;
+        let i = (index.floor() as usize).min(self.values.len() - 1);
+        let t = index - i as f64;
+
+        let i0 = i.saturating_sub(1);
+        let i1 = i;
+        let i2 = (i + 1).min(self.values.len() - 1);
+        let i3 = (i + 2).min(self.values.len() - 1);
+
+        let y0 = self.values[i0];
+        let y1 = self.values[i1];
+        let y2 = self.values[i2];
+        let y3 = self.values[i3];
+
+        let a0 = y3 - y2 - y0 + y1;
+        let a1 = y0 - y1 - a0;
+        let a2 = y2 - y0;
+        let a3 = y1;
+
+        a0 * t * t * t + a1 * t * t + a2 * t + a3
+    }
+
+    /// The lower bound of the table's range.
+    pub fn min(&self) -> f64 {
+        self.min
+    }
+
+    /// The upper bound of the table's range.
+    pub fn max(&self) -> f64 {
+        self.max
+    }
+
+    /// The number of samples in the table.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether the table holds no samples. Always false, since `new` panics
+    /// below two samples.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// The raw sample values.
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_table_interpolates_linearly() {
+        let lut = LookupTable::new(|x| x, 0.0, 1.0, 5);
+        assert_eq!(lut.get(0.0), 0.0);
+        assert_eq!(lut.get(1.0), 1.0);
+        assert!((lut.get(0.5) - 0.5).abs() < 1e-12);
+        assert!((lut.get(0.125) - 0.125).abs() < 1e-12);
+        assert!((lut.get(0.375) - 0.375).abs() < 1e-12);
+    }
+
+    #[test]
+    fn out_of_range_input_is_clamped() {
+        let lut = LookupTable::new(|x| x, 0.0, 1.0, 5);
+        assert_eq!(lut.get(-1.0), 0.0);
+        assert_eq!(lut.get(2.0), 1.0);
+    }
+
+    #[test]
+    fn cubic_passes_through_the_stored_samples() {
+        let lut = LookupTable::new(|x| x, 0.0, 1.0, 5);
+        for (i, value) in lut.values().iter().enumerate() {
+            let x = i as f64 / 4.0;
+            assert!(
+                (lut.cubic(x) - value).abs() < 1e-12,
+                "sample {i}: cubic did not pass through the stored value"
+            );
+        }
+    }
+
+    #[test]
+    fn cubic_of_a_linear_table_matches_the_interior_midpoints() {
+        let lut = LookupTable::new(|x| x, 0.0, 1.0, 5);
+        // Interior segments have four evenly spaced samples available, and the
+        // cubic reproduces the linear value at the segment midpoint. The first
+        // segment is excluded because its left neighbour is clamped.
+        assert!((lut.cubic(0.375) - 0.375).abs() < 1e-12);
+        assert!((lut.cubic(0.625) - 0.625).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_range_is_mapped_onto_the_sample_positions() {
+        let lut = LookupTable::new(|x| x * 2.0, 20.0, 20000.0, 64);
+        assert_eq!(lut.min(), 20.0);
+        assert_eq!(lut.max(), 20000.0);
+        assert_eq!(lut.len(), 64);
+        assert!((lut.get(20.0) - 40.0).abs() < 1e-9);
+        assert!((lut.get(20000.0) - 40000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_non_linear_function_is_sampled_at_evenly_spaced_points() {
+        let lut = LookupTable::new(|x| x * x, 0.0, 1.0, 3);
+        assert_eq!(lut.values(), &[0.0, 0.25, 1.0]);
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify it passes**
+
+The implementation and the tests are written together here because the port is
+mechanical; the test is the specification of the behaviour being preserved.
+
+Run: `cd rust && cargo test -p rippler-dsp lut`
+Expected: 6 tests pass.
+
+- [ ] **Step 3: Verify the port against the C++**
+
+Compare `get` and `cubic` against `LookupTable::operator()` and
+`LookupTable::cubic()` in `src/dsp/Utils.h`. Confirm the index clamping in
+`cubic` is the only intentional difference (the C++ can read past the end of
+its vector).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add rust/crates/rippler-dsp/src/lut.rs
+git commit -m "feat(dsp): port the lookup table with linear and cubic interpolation"
+```
+
+---
+
+### Task 3: Per-voice random number generator
+
+**Files:**
+- Create: `rust/crates/rippler-dsp/src/rng.rs`
+
+The C++ noise generator calls the global `std::rand()`, which is shared between
+all voices, unseeded, and not reproducible. This task introduces a deterministic
+per-voice generator. The mapping the C++ uses is in `src/dsp/Noise.cpp`:
+
+```cpp
+double sample = (std::rand() / (double)RAND_MAX) * 2.0 - 1.0;
+```
+
+- [ ] **Step 1: Write the failing test**
+
+Create `rust/crates/rippler-dsp/src/rng.rs`:
+
+```rust
+//! Deterministic pseudo-random numbers for the noise generator.
+//!
+//! The JUCE implementation calls the global `std::rand()` from
+//! `Noise::process`, which shares one sequence across every voice and cannot
+//! be reproduced. Each voice gets its own generator instead, seeded from its
+//! index, so a given session always sounds the same.
+
+/// A xorshift64* generator.
+#[derive(Clone, Debug)]
+pub struct Rng {
+    state: u64,
+}
+
+/// The seed substituted for a zero seed, which xorshift cannot escape from.
+const DEFAULT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// `2^53`, the denominator used to turn 53 random bits into a unit interval.
+const TWO_POW_53: f64 = 9_007_199_254_740_992.0;
+
+impl Rng {
+    /// Creates a generator with the given seed. A seed of zero is replaced
+    /// with a fixed non-zero constant.
+    pub fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 { DEFAULT_SEED } else { seed },
+        }
+    }
+
+    /// Returns the next 64 random bits.
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.state = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Returns a value in `[0, 1)`.
+    pub fn next_unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / TWO_POW_53
+    }
+
+    /// Returns a value in `[-1, 1)`.
+    ///
+    /// This is the mapping the JUCE implementation used:
+    /// `(rand() / RAND_MAX) * 2.0 - 1.0`.
+    pub fn next_bipolar(&mut self) -> f64 {
+        self.next_unit() * 2.0 - 1.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_same_seed_produces_the_same_sequence() {
+        let mut a = Rng::new(42);
+        let mut b = Rng::new(42);
+        for _ in 0..1000 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+    }
+
+    #[test]
+    fn different_seeds_produce_different_sequences() {
+        let mut a = Rng::new(1);
+        let mut b = Rng::new(2);
+        let differs = (0..100).any(|_| a.next_u64() != b.next_u64());
+        assert!(differs, "two different seeds produced identical output");
+    }
+
+    #[test]
+    fn a_zero_seed_does_not_lock_the_generator_up() {
+        let mut rng = Rng::new(0);
+        let first = rng.next_u64();
+        let second = rng.next_u64();
+        assert_ne!(first, second);
+        assert_ne!(first, 0);
+    }
+
+    #[test]
+    fn unit_samples_stay_in_range() {
+        let mut rng = Rng::new(7);
+        for _ in 0..10_000 {
+            let value = rng.next_unit();
+            assert!((0.0..1.0).contains(&value), "out of range: {value}");
+        }
+    }
+
+    #[test]
+    fn bipolar_samples_stay_in_range() {
+        let mut rng = Rng::new(7);
+        for _ in 0..10_000 {
+            let value = rng.next_bipolar();
+            assert!((-1.0..1.0).contains(&value), "out of range: {value}");
+        }
+    }
+
+    #[test]
+    fn bipolar_samples_are_centred_on_zero() {
+        let mut rng = Rng::new(12345);
+        let count = 100_000;
+        let sum: f64 = (0..count).map(|_| rng.next_bipolar()).sum();
+        let mean = sum / count as f64;
+        assert!(mean.abs() < 0.02, "mean was {mean}");
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify it passes**
+
+Run: `cd rust && cargo test -p rippler-dsp rng`
+Expected: 6 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add rust/crates/rippler-dsp/src/rng.rs
+git commit -m "feat(dsp): add a deterministic per-voice random number generator"
+```
+
+---
+
+### Task 4: Biquad filter
+
+**Files:**
+- Create: `rust/crates/rippler-dsp/src/filter.rs`
+
+Port of `src/dsp/Filter.{h,cpp}`. The C++ mutates a filter in place with
+`lp`/`bp`/`hp`; in Rust these become constructors, because a filter's
+coefficients and its history are set at different times (the noise generator
+copies coefficients from one filter to another with `Filter::copy`).
+
+The C++ `copy` copies only the coefficients, not the history. `copy_from` below
+does the same, which is why the noise generator keeps two filters with separate
+histories but identical coefficients.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `rust/crates/rippler-dsp/src/filter.rs`:
+
+```rust
+//! Second-order IIR filters in direct form I.
+//!
+//! Port of `src/dsp/Filter.{h,cpp}`, which implements the RBJ cookbook
+//! biquads.
+
+/// A second-order IIR filter in direct form I.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Filter {
+    a1: f64,
+    a2: f64,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    x0: f64,
+    x1: f64,
+    y0: f64,
+    y1: f64,
+}
+
+impl Filter {
+    /// The denominator coefficients shared by every response.
+    fn denominator(srate: f64, freq: f64, q: f64) -> (f64, f64) {
+        let w0 = std::f64::consts::TAU * (freq / srate).min(0.49);
+        let alpha = w0.sin() / (2.0 * q);
+        let scale = 1.0 / (1.0 + alpha);
+        (w0.cos() * -2.0 * scale, (1.0 - alpha) * scale)
+    }
+
+    /// A low-pass filter.
+    pub fn low_pass(srate: f64, freq: f64, q: f64) -> Self {
+        let (a1, a2) = Self::denominator(srate, freq, q);
+        let b0 = (1.0 + a1 + a2) * 0.25;
+        Self {
+            a1,
+            a2,
+            b0,
+            b1: b0 * 2.0,
+            b2: b0,
+            ..Default::default()
+        }
+    }
+
+    /// A band-pass filter with unity gain at the centre frequency.
+    pub fn band_pass(srate: f64, freq: f64, q: f64) -> Self {
+        let (a1, a2) = Self::denominator(srate, freq, q);
+        let b0 = (1.0 - a2) * 0.5 * q;
+        Self {
+            a1,
+            a2,
+            b0,
+            b1: 0.0,
+            b2: -b0,
+            ..Default::default()
+        }
+    }
+
+    /// A high-pass filter.
+    pub fn high_pass(srate: f64, freq: f64, q: f64) -> Self {
+        let (a1, a2) = Self::denominator(srate, freq, q);
+        let b0 = (1.0 - a1 + a2) * 0.25;
+        Self {
+            a1,
+            a2,
+            b0,
+            b1: b0 * -2.0,
+            b2: b0,
+            ..Default::default()
+        }
+    }
+
+    /// Resets the filter's history, ramping in from `input`.
+    pub fn clear(&mut self, input: f64) {
+        self.x0 = input;
+        self.x1 = input;
+        self.y0 = input / (1.0 + self.a1 + self.a2) * (self.b0 + self.b1 + self.b2);
+        self.y1 = self.y0;
+    }
+
+    /// Copies the coefficients of `src`, leaving this filter's history alone.
+    pub fn copy_from(&mut self, src: &Filter) {
+        self.a1 = src.a1;
+        self.a2 = src.a2;
+        self.b0 = src.b0;
+        self.b1 = src.b1;
+        self.b2 = src.b2;
+    }
+
+    /// Processes one sample and returns the output.
+    pub fn process(&mut self, sample: f64) -> f64 {
+        let x2 = self.x1;
+        self.x1 = self.x0;
+        self.x0 = sample;
+
+        let y2 = self.y1;
+        self.y1 = self.y0;
+        self.y0 =
+            self.b0 * self.x0 + self.b1 * self.x1 + self.b2 * x2 - self.a1 * self.y1 - self.a2 * y2;
+
+        self.y0
+    }
+
+    /// The magnitude of this filter's response at `freq`, computed directly
+    /// from its coefficients.
+    ///
+    /// Used by the tests to check the difference equation against theory.
+    pub fn magnitude_at(&self, srate: f64, freq: f64) -> f64 {
+        let w = std::f64::consts::TAU * freq / srate;
+        let (sin_w, cos_w) = w.sin_cos();
+        let (sin_2w, cos_2w) = (2.0 * w).sin_cos();
+
+        let num_re = self.b0 + self.b1 * cos_w + self.b2 * cos_2w;
+        let num_im = -(self.b1 * sin_w + self.b2 * sin_2w);
+        let den_re = 1.0 + self.a1 * cos_w + self.a2 * cos_2w;
+        let den_im = -(self.a1 * sin_w + self.a2 * sin_2w);
+
+        num_re.hypot(num_im) / den_re.hypot(den_im)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRATE: f64 = 48_000.0;
+
+    fn rms(samples: &[f64]) -> f64 {
+        (samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn low_pass_has_unit_gain_at_dc() {
+        let mut filter = Filter::low_pass(SRATE, 1000.0, 0.707);
+        let mut last = 0.0;
+        for _ in 0..500 {
+            last = filter.process(1.0);
+        }
+        assert!((last - 1.0).abs() < 1e-9, "dc gain was {last}");
+    }
+
+    #[test]
+    fn high_pass_rejects_dc() {
+        let mut filter = Filter::high_pass(SRATE, 1000.0, 0.707);
+        let mut last = 0.0;
+        for _ in 0..500 {
+            last = filter.process(1.0);
+        }
+        assert!(last.abs() < 1e-12, "dc gain was {last}");
+    }
+
+    #[test]
+    fn band_pass_rejects_dc() {
+        let mut filter = Filter::band_pass(SRATE, 1000.0, 0.707);
+        let mut last = 0.0;
+        for _ in 0..500 {
+            last = filter.process(1.0);
+        }
+        assert!(last.abs() < 1e-12, "dc gain was {last}");
+    }
+
+    #[test]
+    fn the_response_matches_the_magnitude_from_the_coefficients() {
+        for filter in [
+            Filter::low_pass(SRATE, 1000.0, 0.707),
+            Filter::band_pass(SRATE, 1000.0, 0.707),
+            Filter::high_pass(SRATE, 1000.0, 0.707),
+        ] {
+            let expected = filter.magnitude_at(SRATE, 1000.0);
+            let mut filter = filter;
+
+            // 2048 samples to let the transient decay, then 2016 samples,
+            // which is exactly 42 periods of a 1 kHz sine at 48 kHz.
+            let mut output = Vec::with_capacity(4064);
+            for n in 0..4064 {
+                let t = n as f64 / SRATE;
+                output.push(filter.process((std::f64::consts::TAU * 1000.0 * t).sin()));
+            }
+
+            let measured = rms(&output[2048..]);
+            let expected_rms = expected / std::f64::consts::SQRT_2;
+            assert!(
+                (measured - expected_rms).abs() < 1e-9 * expected_rms.max(1e-9),
+                "measured {measured}, expected {expected_rms}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_low_pass_attenuates_high_frequencies() {
+        let mut filter = Filter::low_pass(SRATE, 1000.0, 0.707);
+
+        // 2048 samples to let the transient decay, then 4800 samples, which is
+        // exactly 1000 periods of a 10 kHz sine at 48 kHz.
+        let mut output = Vec::with_capacity(6848);
+        for n in 0..6848 {
+            let t = n as f64 / SRATE;
+            output.push(filter.process((std::f64::consts::TAU * 10_000.0 * t).sin()));
+        }
+        let measured = rms(&output[2048..]);
+
+        let expected = filter.magnitude_at(SRATE, 10_000.0) / std::f64::consts::SQRT_2;
+        assert!(
+            (measured - expected).abs() < 1e-9 * expected.max(1e-9),
+            "measured {measured}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn copying_coefficients_leaves_the_history_alone() {
+        let mut source = Filter::low_pass(SRATE, 1000.0, 0.707);
+        source.process(1.0);
+
+        let mut target = Filter::low_pass(SRATE, 1000.0, 0.707);
+        target.process(0.5);
+        target.copy_from(&source);
+
+        // Same coefficients, so the same response magnitude.
+        assert!(
+            (source.magnitude_at(SRATE, 500.0) - target.magnitude_at(SRATE, 500.0)).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn the_filter_stays_finite_under_a_loud_signal() {
+        let mut filter = Filter::band_pass(SRATE, 1000.0, 0.707);
+        for n in 0..10_000 {
+            let t = n as f64 / SRATE;
+            let value = filter.process((std::f64::consts::TAU * 997.0 * t).sin());
+            assert!(value.is_finite(), "filter produced {value}");
+            assert!(value.abs() < 10.0, "filter produced {value}");
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify it passes**
+
+Run: `cd rust && cargo test -p rippler-dsp filter`
+Expected: 7 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add rust/crates/rippler-dsp/src/filter.rs
+git commit -m "feat(dsp): port the RBJ biquad filters"
+```
+
+---
+
+### Task 5: Envelope with tension
+
+**Files:**
+- Create: `rust/crates/rippler-dsp/src/envelope.rs`
+
+Port of `src/dsp/Envelope.{h,cpp}`, which is itself a port of Envlib (by
+dwelx) based on zenvelib.
+
+**Important:** the envelope's `sustain` argument is in **decibels**, not a linear
+0..1 level. The C++ computes `sus = pow(10, min(s, 0) / 20)`, and its only
+caller (`Noise::initEnvelope` in `src/dsp/Noise.cpp`) converts a linear level to
+decibels first with `susToDb(val) = val * 60.0 - 60.0`. The Rust port keeps the
+decibel convention and names the argument `sustain_db` so the unit is visible.
+
+The stage constants in the C++ are bit flags (`0` off, `1` attack, `2` decay,
+`4` sustain, `8` release). In Rust they become a plain enum.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `rust/crates/rippler-dsp/src/envelope.rs`:
+
+```rust
+//! An ADSR envelope with tension shaping.
+//!
+//! Port of `src/dsp/Envelope.{h,cpp}`, which is a port of Envlib (by dwelx)
+//! based on zenvelib.v1.
+//!
+//! The sustain level is expressed in decibels, matching the C++.
+
+/// The stage an envelope is currently in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stage {
+    /// Silent, and not running.
+    #[default]
+    Off,
+    /// Rising towards the peak.
+    Attack,
+    /// Falling towards the sustain level.
+    Decay,
+    /// Holding at the sustain level.
+    Sustain,
+    /// Falling towards silence.
+    Release,
+}
+
+/// An ADSR envelope with per-stage tension.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Envelope {
+    /// Attack time in samples.
+    pub att: f64,
+    /// Decay time in samples.
+    pub dec: f64,
+    /// Sustain level as a linear gain.
+    pub sus: f64,
+    /// Release time in samples.
+    pub rel: f64,
+    /// The peak level the envelope scales to.
+    pub scale: f64,
+    /// The current output level.
+    pub env: f64,
+    /// The current stage.
+    pub state: Stage,
+
+    ab: f64,
+    ac: f64,
+    db: f64,
+    dc: f64,
+    rb: f64,
+    rc: f64,
+    ta: f64,
+    td: f64,
+    tr: f64,
+}
+
+/// Maps a tension in `[-1, 1]` onto the internal range `[0.001..1, 100]`.
+fn normalize_tension(t: f64) -> f64 {
+    let t = t + 1.0;
+    if t == 1.0 {
+        100.0
+    } else if t > 1.0 {
+        3.001 - t
+    } else {
+        0.001 + t
+    }
+}
+
+/// Computes the `(b, c)` coefficients of one exponential segment.
+fn calc_coefs(
+    target_b1: f64,
+    target_b2: f64,
+    target_c: f64,
+    rate: f64,
+    tension: f64,
+    mult: f64,
+) -> (f64, f64) {
+    if tension > 1.0 {
+        // Slow-start shape.
+        let t = (tension - 1.0).powi(3);
+        let c = (((target_c + t) / t).ln() / rate).exp();
+        let b = (target_b1 - mult * t) * (1.0 - c);
+        (b, c)
+    } else {
+        // Fast-start shape (inverse exponential).
+        let t = tension.powi(3);
+        let c = (-((target_c + t) / t).ln() / rate).exp();
+        let b = (target_b2 + mult * t) * (1.0 - c);
+        (b, c)
+    }
+}
+
+impl Envelope {
+    /// Creates an idle envelope.
+    pub fn new() -> Self {
+        Self {
+            state: Stage::Off,
+            ..Default::default()
+        }
+    }
+
+    /// Configures the envelope's times and tensions.
+    ///
+    /// `a`, `d` and `r` are times in milliseconds. `sustain_db` is the
+    /// sustain level in decibels, where `-60` is silent and `0` is full scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn init(
+        &mut self,
+        srate: f64,
+        a: f64,
+        d: f64,
+        sustain_db: f64,
+        r: f64,
+        tension_a: f64,
+        tension_d: f64,
+        tension_r: f64,
+    ) {
+        self.att = a.max(1.0) * 0.001 * srate;
+        self.dec = d.max(1.0) * 0.001 * srate;
+        self.sus = 10f64.powf(sustain_db.min(0.0) / 20.0);
+        self.rel = r.max(1.0) * 0.001 * srate;
+
+        self.ta = normalize_tension(tension_a);
+        self.td = normalize_tension(-tension_d);
+        self.tr = normalize_tension(-tension_r);
+    }
+
+    /// Recomputes the attack and decay coefficients for the current scale.
+    fn recalc_coefs(&mut self) {
+        let (b, c) = calc_coefs(0.0, self.scale, self.scale, self.att, self.ta, 1.0);
+        self.ab = b;
+        self.ac = c;
+
+        let (b2, c2) = calc_coefs(
+            1.0,
+            self.sus * self.scale,
+            (1.0 - self.sus) * self.scale,
+            self.dec,
+            self.td,
+            -1.0,
+        );
+        self.db = b2;
+        self.dc = c2;
+    }
+
+    /// Silences the envelope and stops it.
+    pub fn reset(&mut self) {
+        self.state = Stage::Off;
+        self.env = 0.0;
+    }
+
+    /// Starts the attack stage towards `scale`.
+    pub fn attack(&mut self, scale: f64) {
+        self.scale = scale;
+        self.recalc_coefs();
+        self.state = Stage::Attack;
+    }
+
+    /// Starts the decay stage.
+    pub fn decay(&mut self) {
+        self.env = self.scale;
+        self.state = Stage::Decay;
+    }
+
+    /// Starts the sustain stage.
+    pub fn sustain(&mut self) {
+        self.env = self.scale * self.sus;
+        self.state = Stage::Sustain;
+    }
+
+    /// Starts the release stage from the current level.
+    pub fn release(&mut self) {
+        let from = self.env.max(self.sus) * self.scale;
+        let (b, c) = calc_coefs(from, 0.0, from, self.rel, self.tr, -1.0);
+        self.rb = b;
+        self.rc = c;
+        self.state = Stage::Release;
+    }
+
+    /// Advances the envelope by one sample and returns its current stage.
+    pub fn process(&mut self) -> Stage {
+        match self.state {
+            Stage::Off => {}
+            Stage::Attack => {
+                self.env = self.ab + self.env * self.ac;
+                if self.env >= self.scale {
+                    self.decay();
+                }
+            }
+            Stage::Decay => {
+                self.env = self.db + self.env * self.dc;
+                if self.env <= self.sus * self.scale {
+                    self.sustain();
+                }
+            }
+            Stage::Release => {
+                self.env = self.rb + self.env * self.rc;
+                if self.env <= 0.0 {
+                    self.reset();
+                }
+            }
+            Stage::Sustain => {}
+        }
+        self.state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRATE: f64 = 48_000.0;
+
+    #[test]
+    fn tension_is_normalised_onto_the_internal_range() {
+        assert_eq!(normalize_tension(-1.0), 0.001);
+        assert_eq!(normalize_tension(0.0), 100.0);
+        assert_eq!(normalize_tension(1.0), 1.001);
+        assert!((normalize_tension(0.4) - 1.601).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_sustain_level_is_expressed_in_decibels() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 1.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
+        assert!((env.sus - 0.031_622_776_601_683_8).abs() < 1e-15);
+    }
+
+    #[test]
+    fn the_envelope_reaches_the_sustain_level() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 1.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
+        env.attack(1.0);
+
+        for _ in 0..10_000 {
+            env.process();
+        }
+
+        assert_eq!(env.state, Stage::Sustain);
+        assert!((env.env - 0.031_622_776_601_683_8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_attack_stage_ends_before_the_decay_stage() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 1.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
+        env.attack(1.0);
+
+        let mut stage = Stage::Attack;
+        for _ in 0..10_000 {
+            stage = env.process();
+            if stage != Stage::Attack {
+                break;
+            }
+        }
+
+        assert_eq!(stage, Stage::Decay);
+    }
+
+    #[test]
+    fn releasing_returns_the_envelope_to_silence() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 1.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
+        env.attack(1.0);
+        for _ in 0..10_000 {
+            env.process();
+        }
+        assert_eq!(env.state, Stage::Sustain);
+
+        env.release();
+        assert_eq!(env.state, Stage::Release);
+
+        for _ in 0..10_000 {
+            env.process();
+        }
+        assert_eq!(env.state, Stage::Off);
+        assert_eq!(env.env, 0.0);
+    }
+
+    #[test]
+    fn resetting_silences_the_envelope() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 1.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
+        env.attack(1.0);
+        for _ in 0..100 {
+            env.process();
+        }
+
+        env.reset();
+        assert_eq!(env.state, Stage::Off);
+        assert_eq!(env.env, 0.0);
+    }
+
+    #[test]
+    fn the_attack_rises_monotonically() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 5.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
+        env.attack(1.0);
+
+        let mut previous = env.env;
+        for _ in 0..100 {
+            env.process();
+            assert!(env.env >= previous, "the attack dipped");
+            previous = env.env;
+        }
+    }
+
+    #[test]
+    fn the_lowest_sustain_level_is_minus_sixty_decibels() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 1.0, 10.0, -60.0, 10.0, 0.4, 0.4, 0.4);
+        env.attack(1.0);
+        for _ in 0..10_000 {
+            env.process();
+        }
+        assert_eq!(env.state, Stage::Sustain);
+        // The C++ maps a linear level of zero onto -60 dB, which is 0.001 of
+        // full scale. The sustain level never reaches true silence.
+        assert!((env.env - 0.001).abs() < 1e-9, "sustain was {}", env.env);
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify it passes**
+
+Run: `cd rust && cargo test -p rippler-dsp envelope`
+Expected: 8 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add rust/crates/rippler-dsp/src/envelope.rs
+git commit -m "feat(dsp): port the ADSR envelope with tension shaping"
+```
+
+---
+
+### Task 6: Comb-filter stereoizer
+
+**Files:**
+- Create: `rust/crates/rippler-dsp/src/comb.rs`
+
+Port of `src/dsp/Comb.h`.
+
+The C++ computes the delay length as `(int)(20 * srate / 1000)`, which is zero
+for a sample rate below 50 Hz and would make the modulo operation divide by
+zero. The port clamps the length to at least one sample.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `rust/crates/rippler-dsp/src/comb.rs`:
+
+```rust
+//! A comb-filter stereoizer.
+//!
+//! Port of `src/dsp/Comb.h`. A single delayed copy of the signal is mixed
+//! into the left channel with one sign and the right channel with the other,
+//! which widens the stereo image.
+
+/// A comb-filter stereoizer.
+#[derive(Clone, Debug, Default)]
+pub struct Comb {
+    buf: Vec<f64>,
+    pos: usize,
+}
+
+impl Comb {
+    /// The length of the delay line, in milliseconds.
+    pub const DELAY_MS: f64 = 20.0;
+
+    /// How much of the delayed signal is mixed in.
+    pub const MIX: f64 = 0.33;
+
+    /// Creates a stereoizer with no delay line allocated yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Allocates the delay line for the given sample rate.
+    ///
+    /// The delay length is clamped to at least one sample, which the C++ does
+    /// not do and which would make its modulo operation divide by zero.
+    pub fn init(&mut self, srate: f64) {
+        self.pos = 0;
+        let length = ((Self::DELAY_MS * srate / 1000.0) as usize).max(1);
+        self.buf.clear();
+        self.buf.resize(length, 0.0);
+    }
+
+    /// The delay line's length in samples.
+    pub fn delay_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Processes one sample and returns the left and right outputs.
+    pub fn process(&mut self, input: f64) -> (f64, f64) {
+        self.buf[self.pos] = input;
+        self.pos = (self.pos + 1) % self.buf.len();
+
+        let delayed = self.buf[self.pos];
+        (input + delayed * Self::MIX, input - delayed * Self::MIX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_delay_line_is_twenty_milliseconds_long() {
+        let mut comb = Comb::new();
+        comb.init(48_000.0);
+        assert_eq!(comb.delay_len(), 960);
+
+        comb.init(44_100.0);
+        assert_eq!(comb.delay_len(), 882);
+    }
+
+    #[test]
+    fn the_delay_line_is_never_empty() {
+        let mut comb = Comb::new();
+        comb.init(1.0);
+        assert_eq!(comb.delay_len(), 1);
+    }
+
+    #[test]
+    fn a_steady_signal_settles_on_the_expected_mix() {
+        let mut comb = Comb::new();
+        comb.init(48_000.0);
+
+        let mut last = (0.0, 0.0);
+        for _ in 0..2000 {
+            last = comb.process(1.0);
+        }
+
+        assert!((last.0 - 1.33).abs() < 1e-12, "left was {}", last.0);
+        assert!((last.1 - 0.67).abs() < 1e-12, "right was {}", last.1);
+    }
+
+    #[test]
+    fn the_first_sample_passes_through_unchanged() {
+        let mut comb = Comb::new();
+        comb.init(48_000.0);
+        let (left, right) = comb.process(0.5);
+        assert_eq!(left, 0.5);
+        assert_eq!(right, 0.5);
+    }
+
+    #[test]
+    fn an_impulse_is_echoed_after_the_delay() {
+        let mut comb = Comb::new();
+        comb.init(48_000.0);
+
+        comb.process(1.0);
+        // The delay line is written at the current position and read from the
+        // next one, so the impulse returns on the 960th call.
+        for _ in 0..958 {
+            let (left, right) = comb.process(0.0);
+            assert!(
+                left.abs() < 1e-12 && right.abs() < 1e-12,
+                "echo arrived early"
+            );
+        }
+
+        let (left, right) = comb.process(0.0);
+        assert!((left - 0.33).abs() < 1e-12, "left was {left}");
+        assert!((right + 0.33).abs() < 1e-12, "right was {right}");
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify it passes**
+
+Run: `cd rust && cargo test -p rippler-dsp comb`
+Expected: 5 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add rust/crates/rippler-dsp/src/comb.rs
+git commit -m "feat(dsp): port the comb-filter stereoizer"
+```
+
+---
+
+### Task 7: Limiter
+
+**Files:**
+- Create: `rust/crates/rippler-dsp/src/limiter.rs`
+
+Port of `src/dsp/Limiter.h`, itself a port of FairlyChildish by Thomas Scott
+Stillwell.
+
+**Known quirk, preserved deliberately.** The C++ `init` computes `rmscoef`
+from `rmstime` *before* assigning `rmstime`:
+
+```cpp
+rmscoef = exp(-1.0 / (rmstime * srate));
+rmstime = rms_win / 1000000.0;
+```
+
+`rmstime` is therefore always zero, `rmscoef` is always zero, and the RMS
+average tracks the instantaneous value rather than a smoothed window. The port
+reproduces this ordering exactly, with a comment, so the sound is unchanged.
+Fixing it is a separate, deliberate change.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `rust/crates/rippler-dsp/src/limiter.rs`:
+
+```rust
+//! A brickwall limiter.
+//!
+//! Port of `src/dsp/Limiter.h`, which is a port of FairlyChildish by Thomas
+//! Scott Stillwell.
+//!
+//! The limiter looks ahead using an RMS estimate, attenuates by a soft-knee
+//! ratio, and applies the gain equally to both channels.
+
+/// A stereo brickwall limiter.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Limiter {
+    log2db: f64,
+    db2log: f64,
+    rundb: f64,
+    runave: f64,
+    threshv: f64,
+    cthresh: f64,
+    cthreshv: f64,
+    ratio: f64,
+    bias: f64,
+    makeupv: f64,
+    capsc: f64,
+    attime: f64,
+    reltime: f64,
+    atcoef: f64,
+    relcoef: f64,
+    rmstime: f64,
+    rmscoef: f64,
+}
+
+impl Limiter {
+    /// `20 / ln(10)`.
+    const LOG2DB: f64 = 8.685_889_638_065_036_553_022_578_378_332_1;
+    /// `ln(10) / 20`.
+    const DB2LOG: f64 = 0.115_129_254_649_702_284_200_899_572_734_22;
+
+    /// Creates an uninitialised limiter. Call [`Limiter::init`] before use.
+    pub fn new() -> Self {
+        Self {
+            log2db: Self::LOG2DB,
+            db2log: Self::DB2LOG,
+            ..Default::default()
+        }
+    }
+
+    /// Configures the limiter.
+    ///
+    /// `thresh` and `makeup` are in decibels. `bias` is a percentage.
+    /// `rms_win` is the RMS window in milliseconds.
+    pub fn init(&mut self, srate: f64, thresh: f64, bias: f64, rms_win: f64, makeup: f64) {
+        self.threshv = (thresh * self.db2log).exp();
+        self.ratio = 20.0;
+        self.bias = 80.0 * bias / 100.0;
+        self.cthresh = thresh - self.bias;
+        self.cthreshv = (self.cthresh * self.db2log).exp();
+        self.makeupv = (makeup * self.db2log).exp();
+        self.capsc = self.log2db;
+        self.attime = 0.0002;
+        self.reltime = 0.3;
+        self.atcoef = (-1.0 / (self.attime * srate)).exp();
+        self.relcoef = (-1.0 / (self.reltime * srate)).exp();
+
+        // NOTE: the original reads `rmstime` before assigning it, so the RMS
+        // window coefficient is always zero and the RMS average tracks the
+        // instantaneous value. Reproduced here so the sound does not change.
+        self.rmscoef = (-1.0 / (self.rmstime * srate)).exp();
+        self.rmstime = rms_win / 1_000_000.0;
+
+        self.runave = 0.0;
+    }
+
+    /// Processes one stereo sample pair and returns the limited output.
+    pub fn process(&mut self, spl0: f64, spl1: f64) -> (f64, f64) {
+        let maxspl = spl0.abs().max(spl1.abs());
+        let maxspl = maxspl * maxspl;
+
+        self.runave = maxspl + self.rmscoef * (self.runave - maxspl);
+        let det = self.runave.max(0.0).sqrt();
+        let mut overdb = (self.capsc * (det / self.threshv).ln()).max(0.0);
+
+        if overdb > self.rundb {
+            self.rundb = overdb + self.atcoef * (self.rundb - overdb);
+        } else {
+            self.rundb = overdb + self.relcoef * (self.rundb - overdb);
+        }
+        overdb = self.rundb.max(0.0);
+
+        let cratio = if self.bias == 0.0 {
+            self.ratio
+        } else {
+            1.0 + (self.ratio - 1.0) * (overdb / self.bias).sqrt()
+        };
+
+        let gr = -overdb * (cratio - 1.0) / cratio;
+        let grv = (gr * self.db2log).exp();
+
+        (spl0 * grv * self.makeupv, spl1 * grv * self.makeupv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRATE: f64 = 48_000.0;
+
+    fn limiter() -> Limiter {
+        let mut limiter = Limiter::new();
+        limiter.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+        limiter
+    }
+
+    #[test]
+    fn a_signal_below_the_threshold_is_untouched() {
+        let mut limiter = limiter();
+        let (left, right) = limiter.process(0.5, -0.5);
+        assert!((left - 0.5).abs() < 1e-12, "left was {left}");
+        assert!((right + 0.5).abs() < 1e-12, "right was {right}");
+    }
+
+    #[test]
+    fn a_signal_above_the_threshold_is_attenuated() {
+        let mut limiter = limiter();
+        let mut last = (0.0, 0.0);
+        for _ in 0..10_000 {
+            last = limiter.process(2.0, 2.0);
+        }
+        assert!(last.0 < 2.0, "the limiter did not attenuate");
+        assert!(last.0 > 0.9 && last.0 < 1.2, "left was {}", last.0);
+        assert!((last.0 - last.1).abs() < 1e-12, "the channels diverged");
+    }
+
+    #[test]
+    fn the_limiter_never_increases_the_signal() {
+        let mut limiter = limiter();
+        for input in [0.1, 0.5, 0.9, 1.0, 1.5, 4.0] {
+            let mut peak = 0.0f64;
+            for _ in 0..1000 {
+                let (left, _) = limiter.process(input, input);
+                peak = peak.max(left.abs());
+            }
+            assert!(peak <= input + 1e-12, "input {input} came out as {peak}");
+        }
+    }
+
+    #[test]
+    fn silence_stays_silent() {
+        let mut limiter = limiter();
+        let (left, right) = limiter.process(0.0, 0.0);
+        assert_eq!(left, 0.0);
+        assert_eq!(right, 0.0);
+    }
+
+    #[test]
+    fn makeup_gain_is_applied() {
+        let mut limiter = Limiter::new();
+        limiter.init(SRATE, 0.0, 70.0, 100.0, 6.0);
+        let (left, _) = limiter.process(0.5, 0.5);
+        let expected = 0.5 * 10f64.powf(6.0 / 20.0);
+        assert!((left - expected).abs() < 1e-12, "left was {left}");
+    }
+
+    #[test]
+    fn the_output_stays_finite_for_extreme_input() {
+        let mut limiter = limiter();
+        for _ in 0..1000 {
+            let (left, right) = limiter.process(1000.0, -1000.0);
+            assert!(left.is_finite() && right.is_finite());
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify it passes**
+
+Run: `cd rust && cargo test -p rippler-dsp limiter`
+Expected: 6 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add rust/crates/rippler-dsp/src/limiter.rs
+git commit -m "feat(dsp): port the brickwall limiter"
+```
+
+---
+
+## Plan 1 completion
+
+- [ ] **Step 1: Run the whole test suite**
+
+Run: `cd rust && cargo test`
+Expected: every test in the workspace passes.
+
+- [ ] **Step 2: Check for warnings**
+
+Run: `cd rust && cargo clippy --all-targets -- -D warnings`
+Expected: no warnings. Fix anything it reports rather than suppressing it.
+
+- [ ] **Step 3: Check formatting**
+
+Run: `cd rust && cargo fmt --check`
+Expected: no diff. If there is one, run `cargo fmt` and re-run the tests.
+
+- [ ] **Step 4: Commit any formatting changes**
+
+```bash
+git add rust
+git commit -m "style: format the Rust workspace"
+```
+
+- [ ] **Step 5: Verify the JUCE build still works**
+
+The JUCE tree must be untouched. Run the existing CMake build to confirm:
+
+```bash
+cmake -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -S . -B ./build
+cmake --build ./build --config Release
+```
+
+Expected: the JUCE plugin still compiles. This is the reference implementation the
+remaining plans port from, so it has to keep working.
+
+## Notes for the next plan
+
+- `rippler-dsp` has no dependencies yet. Plan 3 adds `symphonia` for audio
+  decoding, Plan 4 adds `nice-plug-core` to `rippler-params`.
+- The `Filter::magnitude_at` helper exists for the tests. Plan 3's noise filter
+  tests can reuse it.
+- `Envelope::init` takes its sustain level in decibels. Plan 3's noise module
+  converts the plugin's linear `noise_sus` parameter with the same
+  `susToDb(val) = val * 60 - 60` mapping the C++ uses.

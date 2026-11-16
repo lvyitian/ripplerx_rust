@@ -152,6 +152,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     needs: [build, build-macos]
+    # Creating the release needs write access to the repository contents.
+    permissions:
+      contents: write
     # `always()` so that a macOS job cancelled for lack of runner capacity
     # cannot skip the release, but the release still requires the Windows and
     # Linux builds to have succeeded.
@@ -195,7 +198,7 @@ jobs:
       - name: Create the GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
           tag_name: ${{ github.ref_name }}
           files: |
             artifacts/ripplerx-rust-win-*.zip

@@ -63,11 +63,6 @@ jobs:
           key: ${{ matrix.os }}-cargo-${{ hashFiles('rust/**/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-cargo-
 
-      - name: Install the bundler
-        # `--force` because the cached `~/.cargo/bin` may already hold the
-        # binary, and cargo refuses to overwrite it otherwise.
-        run: cargo install cargo-nice-plug --locked --force
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -78,13 +73,15 @@ jobs:
         run: cargo test --all
 
       - name: Build and bundle
-        run: cargo nice-plug bundle -p rippler-plugin --release
+        # The xtask bundles the plugin and writes the VST3 module information
+        # file, which the JUCE build also ships.
+        run: cargo xtask bundle -p rippler-plugin --release
 
       - name: Build a universal bundle
         if: matrix.os == 'macos-latest'
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          cargo nice-plug bundle-universal -p rippler-plugin --release
+          cargo xtask bundle-universal -p rippler-plugin --release
 
       - name: Upload
         uses: actions/upload-artifact@v4

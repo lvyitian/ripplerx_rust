@@ -22,8 +22,6 @@ jobs:
         include:
           - os: windows-2022
             artifact: ripplerx-rust-win
-          - os: macos-latest
-            artifact: ripplerx-rust-macos
           - os: ubuntu-22.04
             artifact: ripplerx-rust-linux
     runs-on: ${{ matrix.os }}
@@ -89,9 +87,57 @@ jobs:
           name: ${{ matrix.artifact }}
           path: rust/target/bundled/*
 
+  build-macos:
+    # GitHub's macOS runners are physical machines with far less capacity than
+    # the virtualised Linux and Windows ones, so this job regularly cannot get
+    # a runner and is cancelled after fifteen minutes. It must not hold up the
+    # release, but the release still waits for it so that a macOS build which
+    # does get a runner is included.
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install nightly --component clippy,rustfmt
+
+      - name: Cache the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run the tests
+        run: cargo test --all
+
+      - name: Build and bundle
+        run: cargo xtask bundle -p rippler-plugin --release
+
+      - name: Build a universal bundle
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo xtask bundle-universal -p rippler-plugin --release
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ripplerx-rust-macos
+          path: rust/target/bundled/*
+
   release:
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build, build-macos]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download the Windows artifact
@@ -105,6 +151,8 @@ jobs:
         with:
           name: ripplerx-rust-macos
           path: artifacts/ripplerx-rust-macos
+          # The macOS build can be cancelled by a lack of runner capacity.
+          if-no-files-found: ignore
 
       - name: Download the Linux artifact
         uses: actions/download-artifact@v4
@@ -117,8 +165,10 @@ jobs:
           TAG_NAME=${GITHUB_REF#refs/tags/}
           cd artifacts
           zip -r ripplerx-rust-win-${TAG_NAME}.zip ripplerx-rust-win
-          zip -r ripplerx-rust-macos-${TAG_NAME}.zip ripplerx-rust-macos
           zip -r ripplerx-rust-linux-${TAG_NAME}.zip ripplerx-rust-linux
+          if [ -d ripplerx-rust-macos ]; then
+            zip -r ripplerx-rust-macos-${TAG_NAME}.zip ripplerx-rust-macos
+          fi
 
       - name: Create the GitHub release
         uses: softprops/action-gh-release@v2
@@ -127,7 +177,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: |
             artifacts/ripplerx-rust-win-*.zip
-            artifacts/ripplerx-rust-macos-*.zip
             artifacts/ripplerx-rust-linux-*.zip
+            artifacts/ripplerx-rust-macos-*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

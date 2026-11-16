@@ -5,6 +5,7 @@
 //! runs.
 
 pub mod identity;
+pub mod params;
 pub mod process;
 
 use nice_plug::prelude::*;
@@ -18,6 +19,7 @@ use rippler_dsp::voice::Voice;
 use rippler_params::params::RipplerParams;
 use std::sync::Arc;
 
+use crate::params::ParamState;
 use crate::process::{MIDI_QUEUE_CAPACITY, MidiState};
 
 /// The number of voices the plugin has, `globals::MAX_POLYPHONY`.
@@ -61,6 +63,8 @@ pub struct RipplerX {
     polyphony: usize,
     /// The state of the MIDI input.
     midi: MidiState,
+    /// The state of the parameters that have been applied to the voices.
+    params_state: ParamState,
     /// The range of the noise's mix.
     noise_mix_range: FloatRange,
     /// The range of the noise's resonance.
@@ -81,6 +85,7 @@ impl Default for RipplerX {
             srate: 44100.0,
             polyphony: DEFAULT_POLYPHONY,
             midi: MidiState::default(),
+            params_state: ParamState::default(),
             noise_mix_range: FloatRange::Linear { min: 0.0, max: 1.0 },
             noise_res_range: FloatRange::Linear { min: 0.0, max: 1.0 },
         }

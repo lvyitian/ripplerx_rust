@@ -17,6 +17,7 @@ use rippler_params::enums::{Coupling, NoiseFilterMode, PartialCount};
 use rippler_params::params::RipplerParams;
 
 use crate::RipplerX;
+use crate::params::pick_voice;
 
 /// The control change number of the sustain pedal.
 const SUSTAIN_PEDAL: u8 = 64;
@@ -546,6 +547,11 @@ impl RipplerX {
         let num_samples = buffer.samples();
         let block = BlockParams::read(&self.params);
 
+        // The parameters are applied to the voices, the way the JUCE build's
+        // `onSlider` does. This happens before the MIDI is handled, so a
+        // note that starts in this block already uses the new parameters.
+        self.apply_parameters(&block);
+
         let Self {
             voices,
             sampler,
@@ -568,18 +574,6 @@ impl RipplerX {
 
         // The messages that were handled in an earlier block are dropped.
         midi.queue.retain(|msg| msg.offset >= 0);
-
-        // The parameters are applied to the voices, the way the JUCE build's
-        // `onSlider` does.
-        apply_parameters(
-            voices,
-            models,
-            &mut *sampler,
-            &block,
-            srate,
-            midi.bend.current,
-            polyphony,
-        );
 
         // The input is read from the same buffer the output is written to, so
         // the input of a sample is read before the output of that sample is
@@ -884,51 +878,6 @@ fn off_note(
     }
 }
 
-/// Picks the voice a note plays in.
-///
-/// Port of `RipplerXAudioProcessor::pickVoice`:
-///
-/// 1. a voice that already plays the note wins,
-/// 2. a released voice beats a pressed one,
-/// 3. among the released voices the one released longest ago wins,
-/// 4. among the pressed voices the one pressed longest ago wins.
-pub(crate) fn pick_voice(
-    voices: &[Voice],
-    polyphony: usize,
-    reuse_voices: bool,
-    note: i32,
-) -> usize {
-    if reuse_voices {
-        if let Some(index) = voices
-            .iter()
-            .take(polyphony)
-            .position(|voice| voice.note == note)
-        {
-            return index;
-        }
-    }
-
-    let mut pick = 0;
-    for index in 1..polyphony {
-        let candidate = &voices[index];
-        let current = &voices[pick];
-
-        if !candidate.is_pressed && current.is_pressed {
-            pick = index;
-        } else if candidate.is_pressed && !current.is_pressed {
-            // The current pick is released, which has priority.
-        } else if !candidate.is_pressed && !current.is_pressed {
-            if candidate.release_ts < current.release_ts {
-                pick = index;
-            }
-        } else if candidate.pressed_ts < current.pressed_ts {
-            pick = index;
-        }
-    }
-
-    pick
-}
-
 /// Sets the pitch bend's target.
 ///
 /// The bend glides to the target over the glide time.
@@ -940,48 +889,8 @@ fn set_bend_target(bend: &mut Bend, pitch_wheel: f64, bend_range: f64) {
     bend.step = (bend.target - bend.start) / bend.total as f64;
 }
 
-/// Applies the parameters to the voices.
-///
-/// Port of `RipplerXAudioProcessor::onSlider`.
-fn apply_parameters(
-    voices: &mut [Voice],
-    models: &rippler_dsp::models::ModelTables,
-    sampler: &mut rippler_dsp::sampler::Sampler,
-    block: &BlockParams,
-    srate: f64,
-    bend: f64,
-    polyphony: usize,
-) {
-    // The sampler's pitch is set with every other parameter.
-    sampler.set_pitch(block.mallet_pitch);
-
-    let noise_settings = block.noise_settings();
-    let resonator_a = block.resonator_a_settings();
-    let resonator_b = block.resonator_b_settings();
-
-    for voice in voices.iter_mut().take(polyphony) {
-        voice.noise.init(srate, &noise_settings);
-        voice.set_pitch(
-            block.a_coarse,
-            block.b_coarse,
-            block.a_fine,
-            block.b_fine,
-            bend,
-        );
-        voice.set_ratio(block.a_ratio, block.b_ratio);
-        voice.res_a.set_params(srate, &resonator_a);
-        voice.res_b.set_params(srate, &resonator_b);
-        voice.set_coupling(block.couple, block.ab_split);
-        voice.update_resonators(models);
-
-        if (block.mallet_type as u8) >= (MalletType::UserFile as u8) {
-            voice.mallet.set_filter(block.mallet_filter);
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use nice_plug::midi::{Channel, Key, VoiceID};
     use nice_plug_core::params::InternalParamMut;
@@ -990,21 +899,21 @@ mod tests {
     const SRATE: f64 = 44100.0;
 
     /// A plugin with its voices allocated.
-    fn plugin() -> RipplerX {
+    pub(crate) fn plugin() -> RipplerX {
         let mut plugin = RipplerX::default();
         plugin.prepare(SRATE);
         plugin
     }
 
     /// Sets a parameter's value, the way the host does.
-    fn set<T: InternalParamMut>(param: &T, value: T::Plain) {
+    pub(crate) fn set<T: InternalParamMut>(param: &T, value: T::Plain) {
         unsafe {
             param._internal_set_plain_value(value);
         }
     }
 
     /// A note on event.
-    fn note_on(note: u8, velocity: f32, timing: u32) -> NoteEvent<()> {
+    pub(crate) fn note_on(note: u8, velocity: f32, timing: u32) -> NoteEvent<()> {
         NoteEvent::<()>::NoteOn {
             timing,
             voice_id: VoiceID::Wildcard,
@@ -1015,7 +924,7 @@ mod tests {
     }
 
     /// A note off event.
-    fn note_off(note: u8, timing: u32) -> NoteEvent<()> {
+    pub(crate) fn note_off(note: u8, timing: u32) -> NoteEvent<()> {
         NoteEvent::<()>::NoteOff {
             timing,
             voice_id: VoiceID::Wildcard,
@@ -1026,7 +935,7 @@ mod tests {
     }
 
     /// A control change event.
-    fn control_change(cc: u8, value: f32, timing: u32) -> NoteEvent<()> {
+    pub(crate) fn control_change(cc: u8, value: f32, timing: u32) -> NoteEvent<()> {
         NoteEvent::<()>::MidiCC {
             timing,
             channel: 0,
@@ -1036,12 +945,12 @@ mod tests {
     }
 
     /// The sustain pedal, down or up.
-    fn sustain(down: bool, timing: u32) -> NoteEvent<()> {
+    pub(crate) fn sustain(down: bool, timing: u32) -> NoteEvent<()> {
         control_change(SUSTAIN_PEDAL, if down { 1.0 } else { 0.0 }, timing)
     }
 
     /// A pitch wheel event.
-    fn pitch_wheel(value: u16, timing: u32) -> NoteEvent<()> {
+    pub(crate) fn pitch_wheel(value: u16, timing: u32) -> NoteEvent<()> {
         NoteEvent::<()>::MidiPitchBend {
             timing,
             channel: 0,
@@ -1050,7 +959,7 @@ mod tests {
     }
 
     /// Runs one block of audio through the plugin.
-    fn run(
+    pub(crate) fn run(
         plugin: &mut RipplerX,
         num_samples: usize,
         events: &[NoteEvent<()>],
@@ -1076,7 +985,7 @@ mod tests {
     }
 
     /// The loudest sample of a block.
-    fn peak(samples: &[f32]) -> f32 {
+    pub(crate) fn peak(samples: &[f32]) -> f32 {
         samples
             .iter()
             .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
@@ -1086,12 +995,12 @@ mod tests {
     ///
     /// The comb filter holds twenty milliseconds of the signal, so the
     /// output is not silent right after the voices are silenced.
-    fn settle(plugin: &mut RipplerX) {
+    pub(crate) fn settle(plugin: &mut RipplerX) {
         run(plugin, 1024, &[]);
     }
 
     /// A plugin whose notes release quickly.
-    fn short_release_plugin() -> RipplerX {
+    pub(crate) fn short_release_plugin() -> RipplerX {
         let plugin = plugin();
         set(&plugin.params.resonator_a.a_rel, 0.01f32);
         set(&plugin.params.resonator_b.b_rel, 0.01f32);

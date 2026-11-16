@@ -46,7 +46,13 @@ fn oscillators(
             1.0
         };
     } else {
-        for (index, partial) in resonator.partials.iter().enumerate() {
+        // Only the partials the resonator uses are excited.
+        for (index, partial) in resonator
+            .partials
+            .iter()
+            .take(resonator.npartials)
+            .enumerate()
+        {
             if !partial.out_of_range {
                 phases[index] += partial.f_k / srate;
                 if phases[index] > 1.0 {
@@ -598,6 +604,48 @@ mod tests {
         assert_eq!(voice.a_pitch_factor, 1.0);
         assert_eq!(voice.b_pitch_factor, 1.0);
         assert_eq!(voice.pitch_bend, 1.5);
+    }
+
+    #[test]
+    fn the_oscillators_only_excite_the_partials_the_resonator_uses() {
+        let models = ModelTables::new();
+        let sampler = Sampler::new();
+        let luts = Luts::new(SRATE);
+
+        let mut first = sounding_voice(ModalModel::String);
+        let mut second = sounding_voice(ModalModel::String);
+
+        for voice in [&mut first, &mut second] {
+            voice.trigger(
+                1,
+                SRATE,
+                69,
+                0.8,
+                MalletType::Impulse,
+                1000.0,
+                0.0,
+                false,
+                440.0,
+                &models,
+                &sampler,
+            );
+            voice.res_a.npartials = 4;
+        }
+
+        // The second voice's other partials are silenced, which is what the
+        // C++'s `for (int i = 0; i < npartials; i++)` loop achieves by not
+        // reaching them at all.
+        for partial in second.res_a.partials.iter_mut().skip(4) {
+            partial.out_of_range = true;
+        }
+
+        // Both voices use four partials, so their oscillators agree.
+        for _ in 0..10 {
+            assert_eq!(
+                first.process_oscillators(true, &luts),
+                second.process_oscillators(true, &luts)
+            );
+        }
     }
 
     #[test]

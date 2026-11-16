@@ -6,6 +6,9 @@ members = [
     "crates/rippler-plugin",
 ]
 
+[workspace.dependencies]
+rippler-dsp = { path = "crates/rippler-dsp" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

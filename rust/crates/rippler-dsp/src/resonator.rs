@@ -48,9 +48,12 @@ pub struct ResonatorSettings {
 /// A resonator: either a bank of partials or a tube waveguide.
 #[derive(Clone, Debug)]
 pub struct Resonator {
-    partials: Vec<Partial>,
-    waveguide: Waveguide,
-    filter: Filter,
+    /// The partial bank.
+    pub partials: Vec<Partial>,
+    /// The tube waveguide, used by the tube models.
+    pub waveguide: Waveguide,
+    /// The resonator's output filter.
+    pub filter: Filter,
 
     /// Counter of samples of silence.
     pub silence: i64,

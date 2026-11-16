@@ -293,7 +293,7 @@ pub(crate) fn settings_menu(ui: &mut Ui, panels: &Panels, response: &Response) {
             ui.label("RipplerX");
             ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
             ui.label("Copyright (C) Tilr 2025");
-            ui.label("github.com/tiagolr/ripplerx");
+            ui.label("github.com/lvyitian/ripplerx_rust");
             ui.label("- Ctrl for fine slider adjustments.");
             ui.label("- Shift to adjust velocity mapping.");
             ui.label("- Double click to reset sliders.");

@@ -36,7 +36,7 @@ RipplerX is a physically modeled synth, capable of sounds similar to AAS Chromap
   * **Inharmonicity, Tone, Ratio, and Material** sliders to shape the timbre.
   * **Noise and mallet** generators.
   * Up to **64 partials** per resonator.
-  * Built with **JUCE**.
+  * Built with **Rust**, on the [nice-plug](https://codeberg.org/RustAudio/nice-plug) framework.
 
 ## Rippler (Commercial)
 
@@ -46,9 +46,10 @@ Thanks for your support!
 
 ## Download
 
-* [Download latest release](https://github.com/tiagolr/ripplerx/releases)
-* Current builds include VST3 and LV2 for Windows, Linux, and macOS, plus AU for macOS.
-* Clap is planned when there is official [JUCE support](https://juce.com/blog/juce-roadmap-update-q3-2024/).
+* [Download the latest Rust release](https://github.com/lvyitian/ripplerx_rust/releases)
+* The Rust builds include **VST3 and CLAP** for Windows, Linux, and macOS.
+* The original JUCE builds, which also include **LV2** and the macOS **AU**, are
+  [released from the upstream repository](https://github.com/tiagolr/ripplerx/releases).
 
 ## Manual
 
@@ -115,6 +116,35 @@ For more details and a list of players, also check this section of the [Surge tu
 
 ## Build
 
+### Rust (current)
+
+The plugin is built with [Rust](https://www.rust-lang.org) on the
+[nice-plug](https://codeberg.org/RustAudio/nice-plug) framework. The toolchain is
+pinned by `rust/rust-toolchain.toml`.
+
+```bash
+git clone https://github.com/lvyitian/ripplerx_rust.git
+cd ripplerx_rust/rust
+
+cargo build --release
+
+# bundle the VST3 and CLAP plugins
+cargo install cargo-nice-plug --locked
+cargo nice-plug bundle -p rippler-plugin --release
+```
+
+The bundles land in `rust/target/bundled/`.
+
+The Rust build produces **VST3 and CLAP**. The JUCE build also produced AU and
+LV2; nice-plug cannot build those formats, so they are not part of the Rust
+build.
+
+### JUCE (reference implementation)
+
+The original C++ implementation is still in the repository, and is what the Rust
+port was written against. It remains the reference for every behavioural
+question, and it still builds VST3, LV2, AU and a standalone app.
+
 ```bash
 git clone --recurse-submodules https://github.com/tiagolr/ripplerx.git
 
@@ -131,3 +161,17 @@ cmake --build ./build --config Release
 cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -S . -B ./build
 cmake --build ./build --config Release
 ```
+
+## Layout
+
+| Path | What |
+|---|---|
+| `rust/crates/rippler-dsp` | The DSP core. No plugin-framework dependency, and no allocation on the audio path. |
+| `rust/crates/rippler-params` | The 77 parameters, their ranges, the legacy patch reader and the `.ripx` format. |
+| `rust/crates/rippler-plugin` | The plugin shell and the egui editor. |
+| `src/` | The JUCE implementation, kept as the reference for the port. |
+
+The port was verified against the original by a differential harness that
+compiles the C++ and compares the two implementations sample for sample; the DSP
+matches bit for bit. The design, and the notes from each stage of the port, are
+in `docs/superpowers/`.

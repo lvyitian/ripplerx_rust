@@ -366,9 +366,10 @@ impl ClapPlugin for RipplerX {
     const CLAP_DESCRIPTION: Option<&'static str> =
         Some("A physically modelled modal synthesiser with two resonators");
 
-    const CLAP_MANUAL_URL: Option<&'static str> = Some("https://github.com/tiagolr/ripplerx");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some("https://github.com/lvyitian/ripplerx_rust");
 
-    const CLAP_SUPPORT_URL: Option<&'static str> = Some("https://github.com/tiagolr/ripplerx");
+    const CLAP_SUPPORT_URL: Option<&'static str> =
+        Some("https://github.com/lvyitian/ripplerx_rust");
 
     /// The plugin is an instrument with a stereo output.
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Stereo];

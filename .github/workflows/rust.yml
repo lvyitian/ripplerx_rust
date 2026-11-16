@@ -1,0 +1,119 @@
+name: Rust
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            artifact: ripplerx-rust-win
+          - os: macos-latest
+            artifact: ripplerx-rust-macos
+          - os: ubuntu-22.04
+            artifact: ripplerx-rust-linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install nightly --component clippy,rustfmt
+
+      - name: Cache the cargo registry and the bundler
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('rust/**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - name: Install the bundler
+        run: cargo install cargo-nice-plug --locked
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run the tests
+        run: cargo test --all
+
+      - name: Build and bundle
+        run: cargo nice-plug bundle -p rippler-plugin --release
+
+      - name: Build a universal bundle
+        if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo nice-plug bundle-universal -p rippler-plugin --release
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: rust/target/bundled/*
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download the Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ripplerx-rust-win
+          path: artifacts/ripplerx-rust-win
+
+      - name: Download the macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ripplerx-rust-macos
+          path: artifacts/ripplerx-rust-macos
+
+      - name: Download the Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ripplerx-rust-linux
+          path: artifacts/ripplerx-rust-linux
+
+      - name: Zip each platform's artifacts
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          cd artifacts
+          zip -r ripplerx-rust-win-${TAG_NAME}.zip ripplerx-rust-win
+          zip -r ripplerx-rust-macos-${TAG_NAME}.zip ripplerx-rust-macos
+          zip -r ripplerx-rust-linux-${TAG_NAME}.zip ripplerx-rust-linux
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ github.ref_name }}
+          files: |
+            artifacts/ripplerx-rust-win-*.zip
+            artifacts/ripplerx-rust-macos-*.zip
+            artifacts/ripplerx-rust-linux-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

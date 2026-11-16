@@ -4,6 +4,7 @@ members = [
     "crates/rippler-dsp",
     "crates/rippler-params",
     "crates/rippler-plugin",
+    "xtask",
 ]
 
 [workspace.dependencies]
@@ -11,7 +12,7 @@ rippler-dsp = { path = "crates/rippler-dsp" }
 rippler-params = { path = "crates/rippler-params" }
 
 [workspace.package]
-version = "0.1.0"
+version = "1.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"

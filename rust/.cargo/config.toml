@@ -1,0 +1,6 @@
+# The alias that runs the xtask of this workspace.
+#
+# `cargo xtask bundle -p rippler-plugin --release` builds the plugin and
+# bundles it, the way `cargo nice-plug bundle` does.
+[alias]
+xtask = "run --package xtask --release --"

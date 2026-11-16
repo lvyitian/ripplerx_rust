@@ -199,7 +199,12 @@ impl Plugin for RipplerX {
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
 
-    const VERSION: &'static str = "1.5.18";
+    /// The plugin version.
+    ///
+    /// This has to be a literal: the bundler reads it out of the source when
+    /// it writes the module information file for the VST3 bundle. The test
+    /// below checks it against the crate's version, so the two cannot drift.
+    const VERSION: &'static str = "1.6.0";
 
     /// The plugin has a stereo input and a stereo output.
     ///
@@ -391,7 +396,12 @@ impl Vst3Plugin for RipplerX {
     /// plugin's class ID, and it is what the module information file holds.
     const PLATFORM_VST3_CLASS_ID: [u8; 16] = identity::VST3_CLASS_ID;
 
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument];
+    /// The subcategories of the plugin.
+    ///
+    /// The JUCE build is made with `IS_SYNTH TRUE`, so its module information
+    /// file lists both "Instrument" and "Synth", and this matches it.
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Instrument, Vst3SubCategory::Synth];
 }
 
 nice_export_clap!(RipplerX);
@@ -412,5 +422,10 @@ mod tests {
     #[test]
     fn the_clap_identifier_is_the_juce_builds_identifier() {
         assert_eq!(<RipplerX as ClapPlugin>::CLAP_ID, "com.tilr.ripplerx");
+    }
+
+    #[test]
+    fn the_version_is_the_crates_version() {
+        assert_eq!(<RipplerX as Plugin>::VERSION, env!("CARGO_PKG_VERSION"));
     }
 }

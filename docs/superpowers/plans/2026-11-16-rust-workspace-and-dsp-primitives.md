@@ -52,6 +52,7 @@ The C++ source being ported lives in `src/dsp/` at the repository root and stays
 
 **Files:**
 - Create: `rust/Cargo.toml`
+- Create: `rust/rust-toolchain.toml`
 - Create: `rust/crates/rippler-dsp/Cargo.toml`
 - Create: `rust/crates/rippler-dsp/src/lib.rs`
 - Create: `rust/crates/rippler-params/Cargo.toml`
@@ -172,7 +173,21 @@ Create `rust/crates/rippler-plugin/src/lib.rs`:
 //! The RipplerX audio plugin.
 ```
 
-- [ ] **Step 5: Ignore build output**
+- [ ] **Step 5: Pin the toolchain**
+
+Create `rust/rust-toolchain.toml`:
+
+```toml
+[toolchain]
+channel = "nightly"
+components = ["rustfmt", "clippy"]
+```
+
+The local toolchain is nightly, and nice-plug documents that some of its
+functionality depends on optional nightly features. Pinning the channel keeps
+every contributor and the CI build on the same compiler.
+
+- [ ] **Step 6: Ignore build output**
 
 Append to `.gitignore`:
 
@@ -181,7 +196,10 @@ Append to `.gitignore`:
 rust/target/
 ```
 
-- [ ] **Step 6: Verify the workspace builds**
+The file currently ends without a trailing newline. Add one first, so the
+appended block starts on its own line.
+
+- [ ] **Step 7: Verify the workspace builds**
 
 Run: `cd rust && cargo build`
 Expected: compiles all three crates with no errors.
@@ -189,7 +207,7 @@ Expected: compiles all three crates with no errors.
 Run: `cd rust && cargo test`
 Expected: `running 0 tests` for each crate, no failures.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add rust .gitignore
@@ -1604,3 +1622,7 @@ remaining plans port from, so it has to keep working.
 - `Envelope::init` takes its sustain level in decibels. Plan 3's noise module
   converts the plugin's linear `noise_sus` parameter with the same
   `susToDb(val) = val * 60 - 60` mapping the C++ uses.
+- Cargo names the plugin's shared library `librippler_plugin.so` from the
+  package name `rippler-plugin`. Plan 5 bundles the plugin, and the bundle must
+  ship the conventional name `RipplerX.so` / `RipplerX.vst3` / `RipplerX.clap`,
+  so the bundler configuration has to set the artifact name explicitly.

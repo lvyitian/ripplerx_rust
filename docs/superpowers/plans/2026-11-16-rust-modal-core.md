@@ -75,6 +75,7 @@ In Rust the tables are immutable. `beam(ratio)`, `membrane(ratio)` and `plate(ra
 - Internal arithmetic is `f64`, matching the C++.
 - **Use `.powf(n)` for every C++ `pow(x, n)` call, never `.powi(n)`.** `powi` multiplies repeatedly and can differ from libm's `pow` in the last bit, which would break the bit-exactness the harness checks.
 - The C++ clamps with `fmax(lo, fmin(hi, x))`, which returns the non-NaN operand. Rust's `.clamp(lo, hi)` propagates a NaN. They agree for every value the plugin can produce, but if the differential harness reports a difference, this is the first thing to check.
+- `Partial.cpp` uses **two different nestings**, and they do not behave the same way for a NaN: `fmax(0.0, fmin(1.0, x))` clamps a NaN to the high bound, while `fmin(1.0, fmax(-1.0, x))` clamps it to the low bound. Rust's `f64::min` and `f64::max` already match C's `fmin` and `fmax` for NaN, so the two helpers below reproduce the C++ exactly.
 - Every module carries a doc comment naming the C++ file it ports.
 - Tests live in a `#[cfg(test)] mod tests` block at the bottom of the module file.
 - The crate forbids `unsafe` and denies `missing_docs`, so every public item needs a doc comment.
@@ -465,6 +466,27 @@ pub struct Partial {
 
 With these methods:
 
+- Two private clamp helpers that reproduce the C++'s nestings exactly, because
+  `fmin` and `fmax` return the non-NaN operand:
+
+```rust
+/// Clamps as the C++'s `fmax(lo, fmin(hi, x))` does, sending a NaN to the
+/// high bound.
+fn clamp_cpp(lo: f64, hi: f64, x: f64) -> f64 {
+    lo.max(hi.min(x))
+}
+
+/// Clamps as the C++'s `fmin(hi, fmax(lo, x))` does, sending a NaN to the
+/// low bound.
+fn clamp_cpp_inverted(lo: f64, hi: f64, x: f64) -> f64 {
+    hi.min(lo.max(x))
+}
+```
+
+- `Partial::new(k: usize) -> Self`, with `k` **private** and a public `k()`
+  accessor, so a partial numbered zero cannot make a caller index out of
+  bounds.
+
 - `Partial::new(k: usize) -> Self`, initialising every field to the C++'s default: `srate = 0.0`, `decay = 0.0`, `damp = 0.0`, `tone = 0.0`, `hit = 0.0`, `rel = 0.0`, `inharm = 0.0`, the five velocity fields `0.0`, `f_k = 1000.0`, `out_of_range = false`, `base_f_k = 1000.0`, `b0 = 0.0`, `b2 = 0.0`, `a0 = 1.0`, `a1 = 0.0`, `a2 = 0.0`, and the four history values `0.0`.
 
 - `Partial::update(&mut self, freq: f64, ratio: f64, ratio_max: f64, vel: f64, pitch_bend: f64, is_release: bool)`, ported from `Partial::update` with the C++'s exact expression order:
@@ -484,7 +506,7 @@ With these methods:
         // Normalise the velocity contribution on a logarithmic scale.
         let mut inharm_k = (self.inharm.ln() + vel * self.vel_inharm * -0.0001f64.ln()).exp()
             - 0.0001;
-        inharm_k = inharm_k.clamp(0.0, 1.0);
+        inharm_k = clamp_cpp(0.0, 1.0, inharm_k);
         inharm_k = (1.0 + inharm_k * (ratio - 1.0) * (ratio - 1.0)).sqrt();
 
         self.f_k = freq * ratio * inharm_k;
@@ -493,8 +515,8 @@ With these methods:
 
         // Normalise the velocity contribution on a logarithmic scale.
         let mut decay_k = (self.decay.ln() + vel * self.vel_decay * (100.0f64.ln() - 0.01f64.ln()))
-            .exp()
-            .clamp(0.01, 100.0);
+            .exp();
+        decay_k = clamp_cpp(0.01, 100.0, decay_k);
         if is_release {
             decay_k *= self.rel;
         }
@@ -507,7 +529,7 @@ With these methods:
         let omega = std::f64::consts::TAU * self.f_k / self.srate;
         let alpha = std::f64::consts::TAU / self.srate;
 
-        let damp_base = (self.damp + self.vel_damp * 2.0 * vel).clamp(-1.0, 1.0);
+        let damp_base = clamp_cpp_inverted(-1.0, 1.0, self.damp + self.vel_damp * 2.0 * vel);
         let damp_k = if damp_base <= 0.0 {
             (freq / self.f_k).powf(damp_base * 2.0)
         } else {
@@ -516,7 +538,7 @@ With these methods:
 
         decay_k /= damp_k;
 
-        let tone_base = (self.tone + self.vel_tone * 2.0 * vel).clamp(-1.0, 1.0);
+        let tone_base = clamp_cpp_inverted(-1.0, 1.0, self.tone + self.vel_tone * 2.0 * vel);
         let tone_gain = if tone_base <= 0.0 {
             (self.f_k / freq).powf(tone_base * 12.0 / 6.0)
         } else {
@@ -524,8 +546,8 @@ With these methods:
         };
 
         let mut amp_k = (std::f64::consts::PI
-            * self.k as f64
-            * (self.hit + self.vel_hit * vel / 2.0).clamp(0.02, 0.5))
+            * self.k() as f64
+            * clamp_cpp(0.02, 0.5, self.hit + self.vel_hit * vel / 2.0))
             .sin()
             .abs();
         amp_k *= 35.0;

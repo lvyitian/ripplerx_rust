@@ -14,6 +14,7 @@ pub mod lut;
 pub mod luts;
 pub mod models;
 pub mod partial;
+pub mod resonator;
 pub mod rng;
 pub mod utils;
 pub mod waveguide;

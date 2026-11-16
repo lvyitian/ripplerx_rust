@@ -111,6 +111,85 @@ impl MalletType {
     }
 }
 
+/// The mallet types as a nice-plug choice parameter.
+///
+/// The variant order is the legacy choice order, so the index of a mallet is
+/// the value the plugin stores. The names are the ones the JUCE build shows,
+/// including the ten reserved slots, which have to stay to keep every later
+/// index where it is.
+#[cfg(feature = "params")]
+impl nice_plug_core::params::enums::Enum for MalletType {
+    fn variants() -> &'static [&'static str] {
+        &[
+            "Impulse",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "Reserved",
+            "User File",
+            "Click 1",
+            "Click 2",
+            "Click 3",
+            "Click 4",
+            "Click 5",
+            "Click 6",
+            "Blip",
+            "Blop",
+            "Metal 1",
+            "Metal 2",
+            "Wood",
+            "Strike",
+            "Perc 1",
+            "Perc 2",
+        ]
+    }
+
+    fn ids() -> Option<&'static [&'static str]> {
+        Some(&[
+            "impulse",
+            "reserved_1",
+            "reserved_2",
+            "reserved_3",
+            "reserved_4",
+            "reserved_5",
+            "reserved_6",
+            "reserved_7",
+            "reserved_8",
+            "reserved_9",
+            "reserved_10",
+            "user_file",
+            "click_1",
+            "click_2",
+            "click_3",
+            "click_4",
+            "click_5",
+            "click_6",
+            "blip",
+            "blop",
+            "metal_1",
+            "metal_2",
+            "wood",
+            "strike",
+            "perc_1",
+            "perc_2",
+        ])
+    }
+
+    fn to_index(self) -> usize {
+        self as u8 as usize
+    }
+
+    fn from_index(index: usize) -> Self {
+        MalletType::ALL.get(index).copied().unwrap_or(MalletType::Impulse)
+    }
+}
+
 /// The mallet that excites a resonator.
 ///
 /// Port of `src/dsp/Mallet.{h,cpp}`.

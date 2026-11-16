@@ -65,6 +65,72 @@ impl ModalModel {
     }
 }
 
+/// The models in the order of the `a_model` and `b_model` choices.
+#[cfg(feature = "params")]
+const ALL_MODELS: [ModalModel; 12] = [
+    ModalModel::String,
+    ModalModel::Beam,
+    ModalModel::Squared,
+    ModalModel::Membrane,
+    ModalModel::Plate,
+    ModalModel::Drumhead,
+    ModalModel::Marimba,
+    ModalModel::OpenTube,
+    ModalModel::ClosedTube,
+    ModalModel::Marimba2,
+    ModalModel::Bell,
+    ModalModel::Djembe,
+];
+
+/// The models as a nice-plug choice parameter.
+///
+/// The variant order is the legacy choice order, so the index of a model is
+/// the value the plugin stores. The names are the ones the JUCE build shows.
+#[cfg(feature = "params")]
+impl nice_plug_core::params::enums::Enum for ModalModel {
+    fn variants() -> &'static [&'static str] {
+        &[
+            "String",
+            "Beam",
+            "Squared",
+            "Membrane",
+            "Plate",
+            "Drumhead",
+            "Marimba",
+            "Open Tube",
+            "Closed Tube",
+            "Marimba2",
+            "Bell",
+            "Djembe",
+        ]
+    }
+
+    fn ids() -> Option<&'static [&'static str]> {
+        Some(&[
+            "string",
+            "beam",
+            "squared",
+            "membrane",
+            "plate",
+            "drumhead",
+            "marimba",
+            "open_tube",
+            "closed_tube",
+            "marimba_2",
+            "bell",
+            "djembe",
+        ])
+    }
+
+    fn to_index(self) -> usize {
+        self as u8 as usize
+    }
+
+    fn from_index(index: usize) -> Self {
+        ALL_MODELS.get(index).copied().unwrap_or(ModalModel::String)
+    }
+}
+
 /// The free-free beam's roots, `bFree` in the C++.
 ///
 /// `bFree[n]` is the nth solution of `cos(pi*x) = 1/cos(pi*x)`.

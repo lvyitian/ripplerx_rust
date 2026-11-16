@@ -109,14 +109,10 @@ Create `rust/crates/rippler-dsp/src/lib.rs`:
 //!
 //! This crate has no dependency on any plugin framework. Everything here is
 //! portable, testable in isolation, and free of allocation on the audio path.
-
-pub mod comb;
-pub mod envelope;
-pub mod filter;
-pub mod limiter;
-pub mod lut;
-pub mod rng;
 ```
+
+The module declarations are added one at a time by the tasks that create them,
+so the crate always compiles.
 
 - [ ] **Step 3: Create `rippler-params`**
 
@@ -206,11 +202,15 @@ git commit -m "chore: scaffold the Rust workspace for the RipplerX port"
 
 **Files:**
 - Create: `rust/crates/rippler-dsp/src/lut.rs`
-- Modify: `rust/crates/rippler-dsp/src/lib.rs` (already declares `pub mod lut;`)
+- Modify: `rust/crates/rippler-dsp/src/lib.rs` (add `pub mod lut;`)
 
 Port of `LookupTable` in `src/dsp/Utils.h`. The C++ version is a re-implementation of JUCE's `LookupTableTransform` with cubic interpolation added.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the module**
+
+Add `pub mod lut;` to `rust/crates/rippler-dsp/src/lib.rs`.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `rust/crates/rippler-dsp/src/lut.rs`:
 
@@ -389,7 +389,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it passes**
+- [ ] **Step 3: Run the test to verify it passes**
 
 The implementation and the tests are written together here because the port is
 mechanical; the test is the specification of the behaviour being preserved.
@@ -397,17 +397,17 @@ mechanical; the test is the specification of the behaviour being preserved.
 Run: `cd rust && cargo test -p rippler-dsp lut`
 Expected: 6 tests pass.
 
-- [ ] **Step 3: Verify the port against the C++**
+- [ ] **Step 4: Verify the port against the C++**
 
 Compare `get` and `cubic` against `LookupTable::operator()` and
 `LookupTable::cubic()` in `src/dsp/Utils.h`. Confirm the index clamping in
 `cubic` is the only intentional difference (the C++ can read past the end of
 its vector).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add rust/crates/rippler-dsp/src/lut.rs
+git add rust/crates/rippler-dsp/src/lut.rs rust/crates/rippler-dsp/src/lib.rs
 git commit -m "feat(dsp): port the lookup table with linear and cubic interpolation"
 ```
 
@@ -426,7 +426,11 @@ per-voice generator. The mapping the C++ uses is in `src/dsp/Noise.cpp`:
 double sample = (std::rand() / (double)RAND_MAX) * 2.0 - 1.0;
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the module**
+
+Add `pub mod rng;` to `rust/crates/rippler-dsp/src/lib.rs`.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `rust/crates/rippler-dsp/src/rng.rs`:
 
@@ -542,15 +546,15 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it passes**
+- [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp rng`
 Expected: 6 tests pass.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add rust/crates/rippler-dsp/src/rng.rs
+git add rust/crates/rippler-dsp/src/rng.rs rust/crates/rippler-dsp/src/lib.rs
 git commit -m "feat(dsp): add a deterministic per-voice random number generator"
 ```
 
@@ -570,7 +574,11 @@ The C++ `copy` copies only the coefficients, not the history. `copy_from` below
 does the same, which is why the noise generator keeps two filters with separate
 histories but identical coefficients.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the module**
+
+Add `pub mod filter;` to `rust/crates/rippler-dsp/src/lib.rs`.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `rust/crates/rippler-dsp/src/filter.rs`:
 
@@ -809,15 +817,15 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it passes**
+- [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp filter`
 Expected: 7 tests pass.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add rust/crates/rippler-dsp/src/filter.rs
+git add rust/crates/rippler-dsp/src/filter.rs rust/crates/rippler-dsp/src/lib.rs
 git commit -m "feat(dsp): port the RBJ biquad filters"
 ```
 
@@ -840,7 +848,11 @@ decibel convention and names the argument `sustain_db` so the unit is visible.
 The stage constants in the C++ are bit flags (`0` off, `1` attack, `2` decay,
 `4` sustain, `8` release). In Rust they become a plain enum.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the module**
+
+Add `pub mod envelope;` to `rust/crates/rippler-dsp/src/lib.rs`.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `rust/crates/rippler-dsp/src/envelope.rs`:
 
@@ -1164,15 +1176,15 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it passes**
+- [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp envelope`
 Expected: 8 tests pass.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add rust/crates/rippler-dsp/src/envelope.rs
+git add rust/crates/rippler-dsp/src/envelope.rs rust/crates/rippler-dsp/src/lib.rs
 git commit -m "feat(dsp): port the ADSR envelope with tension shaping"
 ```
 
@@ -1189,7 +1201,11 @@ The C++ computes the delay length as `(int)(20 * srate / 1000)`, which is zero
 for a sample rate below 50 Hz and would make the modulo operation divide by
 zero. The port clamps the length to at least one sample.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the module**
+
+Add `pub mod comb;` to `rust/crates/rippler-dsp/src/lib.rs`.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `rust/crates/rippler-dsp/src/comb.rs`:
 
@@ -1312,15 +1328,15 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it passes**
+- [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp comb`
 Expected: 5 tests pass.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add rust/crates/rippler-dsp/src/comb.rs
+git add rust/crates/rippler-dsp/src/comb.rs rust/crates/rippler-dsp/src/lib.rs
 git commit -m "feat(dsp): port the comb-filter stereoizer"
 ```
 
@@ -1347,7 +1363,11 @@ average tracks the instantaneous value rather than a smoothed window. The port
 reproduces this ordering exactly, with a comment, so the sound is unchanged.
 Fixing it is a separate, deliberate change.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the module**
+
+Add `pub mod limiter;` to `rust/crates/rippler-dsp/src/lib.rs`.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `rust/crates/rippler-dsp/src/limiter.rs`:
 
@@ -1525,15 +1545,15 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it passes**
+- [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp limiter`
 Expected: 6 tests pass.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add rust/crates/rippler-dsp/src/limiter.rs
+git add rust/crates/rippler-dsp/src/limiter.rs rust/crates/rippler-dsp/src/lib.rs
 git commit -m "feat(dsp): port the brickwall limiter"
 ```
 
@@ -1546,24 +1566,24 @@ git commit -m "feat(dsp): port the brickwall limiter"
 Run: `cd rust && cargo test`
 Expected: every test in the workspace passes.
 
-- [ ] **Step 2: Check for warnings**
+- [ ] **Step 3: Check for warnings**
 
 Run: `cd rust && cargo clippy --all-targets -- -D warnings`
 Expected: no warnings. Fix anything it reports rather than suppressing it.
 
-- [ ] **Step 3: Check formatting**
+- [ ] **Step 4: Check formatting**
 
 Run: `cd rust && cargo fmt --check`
 Expected: no diff. If there is one, run `cargo fmt` and re-run the tests.
 
-- [ ] **Step 4: Commit any formatting changes**
+- [ ] **Step 5: Commit any formatting changes**
 
 ```bash
 git add rust
 git commit -m "style: format the Rust workspace"
 ```
 
-- [ ] **Step 5: Verify the JUCE build still works**
+- [ ] **Step 6: Verify the JUCE build still works**
 
 The JUCE tree must be untouched. Run the existing CMake build to confirm:
 

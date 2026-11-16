@@ -254,6 +254,12 @@ Two wrinkles inherited from the original are reproduced by the legacy reader:
 - The `userSample` property in old state — a base64 blob of raw doubles — is decoded by
   the reader and stored into the new `#[persist]` field.
 
+**That blob is not standard base64.** JUCE's `MemoryBlock::toBase64Encoding` writes
+the byte count, a dot, then the payload, using a JUCE-specific alphabet whose index 0
+is `.`, and packs the bits LSB-first. A standard RFC 4648 decoder produces garbage
+from it. The legacy reader must reproduce JUCE's format; `rippler-dsp`'s
+`Sampler::load_encoded` already does, and the reader can reuse it.
+
 ## 7. Microtuning
 
 MTS-ESP stays, via the `mts-client-rs` crate (a Rust port of the MTS-ESP client). The

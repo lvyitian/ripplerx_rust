@@ -49,12 +49,16 @@ automation curve — and that is preserved by the range mapping below.
 
 ### 2. The skew mapping is exact
 
-JUCE's `NormalisableRange` with a positive skew `s` normalises as `p^(1/(1+s))`.
-nice-plug's `FloatRange::Skewed` normalises as `p^factor`. So `factor = 1/(1+s)`
-reproduces JUCE's curve bit for bit.
+JUCE's `NormalisableRange` uses the skew **directly as the exponent** — `p^skew` —
+and a skew of exactly `1.0` means a **linear** range, because JUCE short-circuits
+that case before the power. nice-plug's `FloatRange::Skewed` also computes
+`p^factor`. So `factor = skew` reproduces JUCE's curve bit for bit, and a skew of
+`1.0` maps to `FloatRange::Linear` rather than to a square root.
 
-Every skewed parameter in RipplerX has a **positive** skew — `0.2`, `0.3`, `0.5`
-and `1.0` — so all of them map exactly. The unskewed ones map to
+Every skewed parameter in RipplerX has a **positive** skew — `0.2`, `0.3` and
+`0.5` — so all of them map exactly. The coarse and fine pitch parameters, and
+`noise_osc`, have a skew of `1.0`, which means they are linear and sit at the
+centre of their travel. The unskewed ones map to
 `FloatRange::Linear`.
 
 JUCE's `interval` maps to nice-plug's `with_step_size`.
@@ -275,8 +279,9 @@ Create `rust/crates/rippler-params/src/ranges.rs`:
 //! Reproducing JUCE's parameter ranges.
 //!
 //! JUCE's `NormalisableRange` with a positive skew `s` normalises a value as
-//! `p^(1/(1+s))`, and nice-plug's `FloatRange::Skewed` normalises as
-//! `p^factor`, so `factor = 1/(1+s)` reproduces JUCE's curve exactly.
+//! `p^skew`, and a skew of exactly `1.0` means a linear range, because JUCE
+//! short-circuits that case. nice-plug's `FloatRange::Skewed` also computes
+//! `p^factor`, so `factor = skew` reproduces JUCE's curve exactly.
 
 use nice_plug_core::params::range::FloatRange;
 

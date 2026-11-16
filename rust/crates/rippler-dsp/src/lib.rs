@@ -6,5 +6,6 @@
 pub mod comb;
 pub mod envelope;
 pub mod filter;
+pub mod limiter;
 pub mod lut;
 pub mod rng;

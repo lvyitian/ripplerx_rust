@@ -7,7 +7,9 @@
 pub mod identity;
 pub mod params;
 pub mod process;
+pub mod tuning;
 
+use mts_client_rs::Client;
 use nice_plug::prelude::*;
 use rippler_dsp::comb::Comb;
 use rippler_dsp::limiter::Limiter;
@@ -69,6 +71,11 @@ pub struct RipplerX {
     noise_mix_range: FloatRange,
     /// The range of the noise's resonance.
     noise_res_range: FloatRange,
+    /// The MTS-ESP client, if the library is installed.
+    ///
+    /// The client is created on the thread that builds the plugin, which is
+    /// not the audio thread, and it is dropped with the plugin.
+    tuning: Option<Client>,
 }
 
 impl Default for RipplerX {
@@ -88,6 +95,9 @@ impl Default for RipplerX {
             params_state: ParamState::default(),
             noise_mix_range: FloatRange::Linear { min: 0.0, max: 1.0 },
             noise_res_range: FloatRange::Linear { min: 0.0, max: 1.0 },
+            // The client is optional: without the MTS-ESP library the
+            // plugin falls back to the equal temperament.
+            tuning: Client::new().ok(),
         }
     }
 }

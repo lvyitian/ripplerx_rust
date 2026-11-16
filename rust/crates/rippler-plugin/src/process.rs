@@ -566,6 +566,7 @@ impl RipplerX {
             polyphony,
             noise_mix_range,
             noise_res_range,
+            tuning,
             ..
         } = self;
 
@@ -606,6 +607,7 @@ impl RipplerX {
                         srate,
                         block.bend_range,
                         polyphony,
+                        tuning.as_ref(),
                     );
                 }
 
@@ -761,6 +763,7 @@ fn handle_message(
     srate: f64,
     bend_range: f64,
     polyphony: usize,
+    tuning: Option<&mts_client_rs::Client>,
 ) {
     let MidiState {
         sustain_pedal,
@@ -782,6 +785,7 @@ fn handle_message(
                 params,
                 srate,
                 polyphony,
+                tuning,
             );
 
             // A note that is pressed again is not held by the sustain pedal.
@@ -821,6 +825,7 @@ fn on_note(
     params: &RipplerParams,
     srate: f64,
     polyphony: usize,
+    tuning: Option<&mts_client_rs::Client>,
 ) {
     let reuse_voices = params.reuse_voices.value();
     let nvoice = pick_voice(voices, polyphony, reuse_voices, msg.note);
@@ -842,7 +847,7 @@ fn on_note(
 
     // The JUCE build asks MTS-ESP for the frequency and falls back to the
     // equal temperament formula.
-    let freq = 440.0 * 2.0f64.powf((msg.note - 69) as f64 / 12.0);
+    let freq = crate::tuning::note_to_frequency(msg.note, tuning);
 
     *press_count += 1;
     voice.trigger(

@@ -11,6 +11,7 @@ repository.workspace = true
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
+mts-client-rs = "0.1.0"
 nice-plug = { version = "0.4", default-features = false, features = ["vst3"] }
 nice-plug-core = { version = "0.4", default-features = false }
 rippler-dsp = { workspace = true }

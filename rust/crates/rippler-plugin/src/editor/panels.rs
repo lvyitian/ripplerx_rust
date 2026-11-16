@@ -167,19 +167,36 @@ fn section_label(ui: &mut Ui, theme: &Theme, text: &str) {
     ui.label(RichText::new(text).color(theme.neutral_light).size(16.0));
 }
 
+/// How a combo box is drawn.
+struct ComboStyle<'a> {
+    /// The choices.
+    choices: &'a [&'a str],
+    /// The order of the choices.
+    ///
+    /// An empty order means that the choices are shown in the order the
+    /// parameter holds them in.
+    order: &'a [usize],
+    /// Whether the combo is filled with the active colour.
+    filled: bool,
+    /// The colours.
+    theme: &'a Theme,
+    /// The width of the combo.
+    width: f32,
+}
+
 /// Draws a combo box bound to a choice parameter.
 ///
 /// The `order` says which value of the parameter every entry stands for, so
 /// that the entries can be shown in the order the JUCE build shows them in.
-fn combo(
-    ui: &mut Ui,
-    params: &Params,
-    id: &str,
-    choices: &[&str],
-    order: &[usize],
-    filled: bool,
-    theme: &Theme,
-) -> Response {
+fn combo(ui: &mut Ui, params: &Params, id: &str, style: ComboStyle) -> Response {
+    let ComboStyle {
+        choices,
+        order,
+        filled,
+        theme,
+        width,
+    } = style;
+
     // An empty order means that the choices are shown in the order the
     // parameter holds them in.
     let order: Vec<usize> = if order.is_empty() {
@@ -215,6 +232,7 @@ fn combo(
     }
 
     let response = egui::ComboBox::from_id_salt(id)
+        .width(width)
         .selected_text(choices[selected])
         .show_ui(ui, |ui| {
             for (position, choice) in choices.iter().enumerate() {
@@ -376,10 +394,13 @@ pub(crate) fn noise_section(ui: &mut Ui, panels: &Panels) {
             ui,
             panels.params,
             "noise_filter_mode",
-            NoiseFilterMode::variants(),
-            &[],
-            false,
-            &panels.theme,
+            ComboStyle {
+                choices: NoiseFilterMode::variants(),
+                order: &[],
+                filled: false,
+                theme: &panels.theme,
+                width: 60.0,
+            },
         );
     });
 
@@ -667,20 +688,26 @@ pub(crate) fn resonator_section(ui: &mut Ui, panels: &Panels, ids: &ResonatorIds
             ui,
             panels.params,
             ids.model,
-            ModalModel::variants(),
-            &MODEL_ORDER,
-            true,
-            &theme,
+            ComboStyle {
+                choices: ModalModel::variants(),
+                order: &MODEL_ORDER,
+                filled: true,
+                theme: &theme,
+                width: 100.0,
+            },
         );
         if !tube {
             combo(
                 ui,
                 panels.params,
                 ids.partials,
-                PartialCount::variants(),
-                &PARTIALS_ORDER,
-                false,
-                &theme,
+                ComboStyle {
+                    choices: PartialCount::variants(),
+                    order: &PARTIALS_ORDER,
+                    filled: false,
+                    theme: &theme,
+                    width: 60.0,
+                },
             );
         }
     });
@@ -770,10 +797,13 @@ pub(crate) fn coupling_section(ui: &mut Ui, panels: &Panels) {
         ui,
         panels.params,
         "couple",
-        Coupling::variants(),
-        &[],
-        true,
-        &theme,
+        ComboStyle {
+            choices: Coupling::variants(),
+            order: &[],
+            filled: true,
+            theme: &theme,
+            width: 70.0,
+        },
     );
 
     Grid::new("coupling-knobs")
@@ -1087,6 +1117,100 @@ mod tests {
             }),
             2
         );
+    }
+
+    /// Draws the whole editor and returns the rectangle its content is in.
+    fn content_bounds() -> egui::Rect {
+        let context = egui::Context::default();
+        let gui = nice_plug::context::gui::GuiContext::new(Arc::new(Mock));
+        let setter = gui.param_setter();
+        let parameters = RipplerParams::default();
+        let map = Parameters::new(&parameters);
+        let images = Images::load(&context);
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let polyphony = Arc::new(AtomicUsize::new(8));
+        let velocity = Arc::new(AtomicBool::new(false));
+        let user_sample = Arc::new(Mutex::new(None));
+
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(650.0, 485.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let params = Params::new(&parameters, &map, &setter);
+                    let panels = Panels {
+                        params: &params,
+                        theme: Theme::LIGHT,
+                        velocity_mode: false,
+                        images: &images,
+                        meter: 0.0,
+                        settings: &settings,
+                        polyphony: &polyphony,
+                        velocity: &velocity,
+                        user_sample: &user_sample,
+                    };
+                    top_bar(ui, &panels);
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.vertical(|ui| noise_section(ui, &panels));
+                        ui.vertical(|ui| mallet_section(ui, &panels));
+                        ui.vertical(|ui| {
+                            resonator_section(ui, &panels, &resonator_a());
+                            resonator_section(ui, &panels, &resonator_b());
+                        });
+                        ui.vertical(|ui| coupling_section(ui, &panels));
+                    });
+                });
+            },
+        );
+        // The textures are never painted, so the deltas are dropped on
+        // purpose.
+        output.textures_delta.clear();
+
+        fn bounds_of(points: &[egui::Pos2]) -> egui::Rect {
+            let mut min = points[0];
+            let mut max = points[0];
+            for point in points {
+                min = min.min(*point);
+                max = max.max(*point);
+            }
+            egui::Rect::from_min_max(min, max)
+        }
+
+        let mut bounds: Option<egui::Rect> = None;
+        for shape in &output.shapes {
+            let rect = match &shape.shape {
+                egui::Shape::Circle(circle) => egui::Rect::from_center_size(
+                    circle.center,
+                    vec2(circle.radius * 2.0, circle.radius * 2.0),
+                ),
+                egui::Shape::Rect(rect) => rect.rect,
+                egui::Shape::LineSegment { points, .. } => bounds_of(points),
+                egui::Shape::Path(path) => bounds_of(&path.points),
+                egui::Shape::Text(text) => text.galley.rect,
+                _ => continue,
+            };
+            bounds = Some(match bounds {
+                Some(bounds) => bounds.union(rect),
+                None => rect,
+            });
+        }
+
+        bounds.unwrap_or(egui::Rect::ZERO)
+    }
+
+    #[test]
+    fn the_editor_fits_in_its_window() {
+        // The JUCE editor is 650 by 485, and the editor of this build is
+        // the same size.
+        let bounds = content_bounds();
+        assert!(bounds.max.x <= 650.0, "the editor is {} wide", bounds.max.x);
+        assert!(bounds.max.y <= 485.0, "the editor is {} high", bounds.max.y);
     }
 
     #[test]

@@ -427,14 +427,19 @@ impl NiceEguiApp for RipplerEditor {
 
         panels::top_bar(ui, &panels);
 
+        // Every section is a column of its own, the way the sections of the
+        // JUCE editor are.
         ui.horizontal_top(|ui| {
-            panels::noise_section(ui, &panels);
-            panels::mallet_section(ui, &panels);
+            // The sections are next to each other, the way they are in the
+            // JUCE editor.
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.vertical(|ui| panels::noise_section(ui, &panels));
+            ui.vertical(|ui| panels::mallet_section(ui, &panels));
             ui.vertical(|ui| {
                 panels::resonator_section(ui, &panels, &panels::resonator_a());
                 panels::resonator_section(ui, &panels, &panels::resonator_b());
             });
-            panels::coupling_section(ui, &panels);
+            ui.vertical(|ui| panels::coupling_section(ui, &panels));
         });
     }
 

@@ -13,6 +13,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# A new push to a ref cancels the run that was already going for it, rather
+# than building the same thing twice.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.os }}
@@ -93,6 +99,11 @@ jobs:
     # a runner and is cancelled after fifteen minutes. It must not hold up the
     # release, but the release still waits for it so that a macOS build which
     # does get a runner is included.
+    #
+    # Only the tagged release needs a macOS build, so it is not run for the
+    # ordinary master builds. That keeps the scarce runners for when they
+    # matter.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: macos-latest
     continue-on-error: true
     steps:

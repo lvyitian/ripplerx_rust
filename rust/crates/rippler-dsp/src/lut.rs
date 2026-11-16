@@ -3,11 +3,16 @@
 //! Port of `LookupTable` in `src/dsp/Utils.h`.
 
 /// A table of precomputed values sampled evenly across `[min, max]`.
+///
+/// A `NaN` input is degenerate in Rust: `clamp` propagates the `NaN` and the
+/// index saturates to zero, so the result is `NaN` where the C++ would be
+/// undefined. The callers only ever pass computed frequencies, so this is
+/// documented rather than guarded.
 #[derive(Clone, Debug)]
 pub struct LookupTable {
     values: Vec<f64>,
-    min: f64,
-    max: f64,
+    min_value: f64,
+    max_value: f64,
     scaler: f64,
     offset: f64,
 }
@@ -35,8 +40,8 @@ impl LookupTable {
 
         Self {
             values,
-            min,
-            max,
+            min_value: min,
+            max_value: max,
             scaler,
             offset,
         }
@@ -44,7 +49,7 @@ impl LookupTable {
 
     /// Linear interpolation. `input` is clamped to the table's range.
     pub fn get(&self, input: f64) -> f64 {
-        let input = input.clamp(self.min, self.max);
+        let input = input.clamp(self.min_value, self.max_value);
         let normalized_index = input * self.scaler + self.offset;
         let index = normalized_index.floor() as usize;
 
@@ -58,10 +63,15 @@ impl LookupTable {
 
     /// Cubic interpolation over the four samples surrounding `input`.
     ///
-    /// The sample indices are clamped at both ends, matching the C++ which
-    /// clamps `i0` and `i2`/`i3` but could index past the end of the vector.
+    /// This is a literal transliteration of the C++ `LookupTable::cubic`: the
+    /// same clamped index, the same `i0`/`i2`/`i3` clamping and the same cubic
+    /// coefficients. The index clamping is a no-op on the reachable domain,
+    /// since the C++'s `i1 = i <= size - 1`, `i0 = max(0, i - 1)` and
+    /// `i2`/`i3 = min(size - 1, ...)` never yield an index outside the
+    /// vector. The extra `i.min(len - 1)` guard only removes a potential
+    /// out-of-bounds read for inputs the C++ would treat as undefined.
     pub fn cubic(&self, input: f64) -> f64 {
-        let input = input.clamp(self.min, self.max);
+        let input = input.clamp(self.min_value, self.max_value);
         let index = input * self.scaler + self.offset;
         let i = (index.floor() as usize).min(self.values.len() - 1);
         let t = index - i as f64;
@@ -86,12 +96,12 @@ impl LookupTable {
 
     /// The lower bound of the table's range.
     pub fn min(&self) -> f64 {
-        self.min
+        self.min_value
     }
 
     /// The upper bound of the table's range.
     pub fn max(&self) -> f64 {
-        self.max
+        self.max_value
     }
 
     /// The number of samples in the table.
@@ -168,5 +178,93 @@ mod tests {
     fn a_non_linear_function_is_sampled_at_evenly_spaced_points() {
         let lut = LookupTable::new(|x| x * x, 0.0, 1.0, 3);
         assert_eq!(lut.values(), &[0.0, 0.25, 1.0]);
+    }
+
+    #[test]
+    fn the_minimum_size_table_of_two_samples_works() {
+        let lut = LookupTable::new(|x| x, 0.0, 1.0, 2);
+        assert_eq!(lut.len(), 2);
+        assert_eq!(lut.values(), &[0.0, 1.0]);
+
+        // The upper end takes the `index >= len - 1` early return in `get`.
+        assert_eq!(lut.get(1.0), 1.0);
+        assert!((lut.get(0.5) - 0.5).abs() < 1e-12);
+        assert!((lut.get(0.25) - 0.25).abs() < 1e-12);
+        assert_eq!(lut.get(-1.0), 0.0);
+        assert_eq!(lut.get(2.0), 1.0);
+    }
+
+    #[test]
+    fn the_minimum_size_table_of_two_samples_interpolates_cubically() {
+        let lut = LookupTable::new(|x| x, 0.0, 1.0, 2);
+
+        // `i2` and `i3` are clamped to the last sample for every input.
+        assert!((lut.cubic(0.0) - 0.0).abs() < 1e-12);
+        assert!((lut.cubic(1.0) - 1.0).abs() < 1e-12);
+        assert!((lut.cubic(0.5) - 0.5).abs() < 1e-12);
+        assert!((lut.cubic(-1.0) - 0.0).abs() < 1e-12);
+        assert!((lut.cubic(2.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_negative_min_flips_the_sign_of_the_offset() {
+        let lut = LookupTable::new(|x| x, -10.0, 10.0, 5);
+        assert_eq!(lut.min(), -10.0);
+        assert_eq!(lut.max(), 10.0);
+        assert_eq!(lut.values(), &[-10.0, -5.0, 0.0, 5.0, 10.0]);
+
+        // `offset = -min * scaler` is positive here, so the index starts at
+        // zero at `min` rather than at the negative end.
+        assert!((lut.get(-10.0) - -10.0).abs() < 1e-12);
+        assert!((lut.get(0.0) - 0.0).abs() < 1e-12);
+        assert!((lut.get(5.0) - 5.0).abs() < 1e-12);
+        assert!((lut.get(10.0) - 10.0).abs() < 1e-12);
+        assert!((lut.get(-100.0) - -10.0).abs() < 1e-12);
+        assert!((lut.get(100.0) - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_negative_min_interpolates_cubically() {
+        let lut = LookupTable::new(|x| x, -10.0, 10.0, 5);
+        assert!((lut.cubic(-10.0) - -10.0).abs() < 1e-12);
+        assert!((lut.cubic(10.0) - 10.0).abs() < 1e-12);
+        assert!((lut.cubic(0.0) - 0.0).abs() < 1e-12);
+        assert!((lut.cubic(-100.0) - -10.0).abs() < 1e-12);
+        assert!((lut.cubic(100.0) - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cubic_at_the_endpoints_matches_the_stored_samples() {
+        let lut = LookupTable::new(|x| x * x, 0.0, 1.0, 5);
+        assert_eq!(lut.values(), &[0.0, 0.0625, 0.25, 0.5625, 1.0]);
+        assert!((lut.cubic(0.0) - 0.0).abs() < 1e-12);
+        assert!((lut.cubic(1.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cubic_outside_the_range_is_clamped_to_the_endpoints() {
+        let lut = LookupTable::new(|x| x * x, 0.0, 1.0, 5);
+        assert!((lut.cubic(-1.0) - lut.cubic(0.0)).abs() < 1e-12);
+        assert!((lut.cubic(2.0) - lut.cubic(1.0)).abs() < 1e-12);
+        assert!((lut.cubic(-1.0) - 0.0).abs() < 1e-12);
+        assert!((lut.cubic(2.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    #[should_panic(expected = "max must be greater than min")]
+    fn an_empty_range_panics() {
+        let _ = LookupTable::new(|x| x, 1.0, 1.0, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "max must be greater than min")]
+    fn an_inverted_range_panics() {
+        let _ = LookupTable::new(|x| x, 2.0, 1.0, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "size must be at least 2")]
+    fn a_table_of_one_sample_panics() {
+        let _ = LookupTable::new(|x| x, 0.0, 1.0, 1);
     }
 }

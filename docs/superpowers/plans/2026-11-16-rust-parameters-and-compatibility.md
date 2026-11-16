@@ -134,6 +134,10 @@ Grouped as they will be nested. The identifiers are the legacy ones, verbatim.
 
 Taken from `src/PluginProcessor.cpp`. `skew` is JUCE's `NormalisableRange` skew.
 
+Note that the coarse and fine pitch parameters are **not** unskewed: the C++
+gives them `NormalisableRange<float>(-48.0f, 48.0f, 1.0f, 1.0f)` and
+`(-99.0f, 99.0f, 1.0f, 1.0f)`, so they carry a skew of 1.0 and a step of 1.0.
+
 | Parameter | Type | Range | Default | Skew | Step |
 |---|---|---|---|---|---|
 | `mallet_type` | choice | 26 | Impulse | | |
@@ -168,8 +172,8 @@ Taken from `src/PluginProcessor.cpp`. `skew` is JUCE's `NormalisableRange` skew.
 | `a_ratio` / `b_ratio` | float | 0.1 … 10 | 1 | 0.3 | 0.01 |
 | `a_cut` / `b_cut` | float | -1 … 1 | 0 | | |
 | `a_radius` / `b_radius` | float | 0 … 1 | 0.5 | | |
-| `a_coarse` / `b_coarse` | float | -48 … 48 | 0 | | |
-| `a_fine` / `b_fine` | float | -99 … 99 | 0 | | |
+| `a_coarse` / `b_coarse` | float | -48 … 48 | 0 | 1.0 | 1 |
+| `a_fine` / `b_fine` | float | -99 … 99 | 0 | 1.0 | 1 |
 | `vel_*` (21) | float | -1 … 1 | 0 | | |
 | `couple` | choice | 2 | A+B | | |
 | `ab_mix` | float | 0 … 1 | 0.5 | | |
@@ -213,10 +217,22 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+nice-plug = { version = "0.4", default-features = false }
 nice-plug-core = { version = "0.4", default-features = false }
-quick-xml = "0.38"
+quick-xml = "0.42"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rippler-dsp = { workspace = true, features = ["params"] }
 ```
+
+`nice-plug` is needed alongside `nice-plug-core`, because nice-plug 0.4.2's
+`Params` derive macro emits `::nice_plug::params::Param` paths and does not
+compile with only `nice-plug-core` present. Both resolve to the same version,
+so the types are identical.
+
+The crate **cannot** use `#![forbid(unsafe_code)]`: nice-plug's `Params` is an
+unsafe trait, so the derive writes an `unsafe impl`. Use `#![deny(missing_docs)]`
+instead, and let the derive's `unsafe` stand.
 
 Create `rust/crates/rippler-params/src/lib.rs`:
 
@@ -516,7 +532,9 @@ pub fn to_parameter_values(patch: &LegacyPatch) -> BTreeMap<String, f64>;
 
 Snapping matters: JUCE's `AudioParameterFloat::setValue` snaps to the legal
 value, so a stored `10.77999973297119` with a step of `0.01` becomes `10.78`.
-A value with no step size is left exactly as it is.
+A value with no step size is left exactly as it is, rather than being clamped
+to the range the way JUCE would — every value in every factory preset is
+already inside its range, so this never bites in practice.
 
 - [ ] **Step 3: Write the tests**
 

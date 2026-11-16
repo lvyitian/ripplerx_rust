@@ -7,7 +7,7 @@
 //! ratio, and applies the gain equally to both channels.
 
 /// A stereo brickwall limiter.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Limiter {
     log2db: f64,
     db2log: f64,
@@ -35,11 +35,28 @@ impl Limiter {
     const DB2LOG: f64 = 0.115_129_254_649_702_284_200_899_572_734_22;
 
     /// Creates an uninitialised limiter. Call [`Limiter::init`] before use.
+    ///
+    /// This is the same value as [`Limiter::default`]: the two conversion
+    /// constants are filled in, so that `init` computes a usable `capsc`.
     pub fn new() -> Self {
         Self {
             log2db: Self::LOG2DB,
             db2log: Self::DB2LOG,
-            ..Default::default()
+            rundb: 0.0,
+            runave: 0.0,
+            threshv: 0.0,
+            cthresh: 0.0,
+            cthreshv: 0.0,
+            ratio: 0.0,
+            bias: 0.0,
+            makeupv: 0.0,
+            capsc: 0.0,
+            attime: 0.0002,
+            reltime: 0.3,
+            atcoef: 0.0,
+            relcoef: 0.0,
+            rmstime: 0.0,
+            rmscoef: 0.0,
         }
     }
 
@@ -60,9 +77,11 @@ impl Limiter {
         self.atcoef = (-1.0 / (self.attime * srate)).exp();
         self.relcoef = (-1.0 / (self.reltime * srate)).exp();
 
-        // NOTE: the original reads `rmstime` before assigning it, so the RMS
-        // window coefficient is always zero and the RMS average tracks the
-        // instantaneous value. Reproduced here so the sound does not change.
+        // NOTE: the original reads `rmstime` before assigning it. On a *first*
+        // `init` the field is still zero, so the coefficient is zero and the
+        // RMS average tracks the instantaneous value. A *second* `init` reuses
+        // the now-set `rmstime`, which gives a non-zero coefficient. The
+        // ordering is reproduced here so the sound does not change.
         self.rmscoef = (-1.0 / (self.rmstime * srate)).exp();
         self.rmstime = rms_win / 1_000_000.0;
 
@@ -95,6 +114,17 @@ impl Limiter {
         let grv = (gr * self.db2log).exp();
 
         (spl0 * grv * self.makeupv, spl1 * grv * self.makeupv)
+    }
+}
+
+impl Default for Limiter {
+    /// Same as [`Limiter::new`].
+    ///
+    /// A derived `Default` would leave the conversion constants at zero and
+    /// make `init` compute a `capsc` of zero, so the limiter would do
+    /// nothing. Delegating keeps the two constructors identical.
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -166,6 +196,51 @@ mod tests {
         for _ in 0..1000 {
             let (left, right) = limiter.process(1000.0, -1000.0);
             assert!(left.is_finite() && right.is_finite());
+        }
+    }
+
+    #[test]
+    fn the_default_limiter_behaves_like_a_new_one() {
+        let mut from_default = Limiter::default();
+        let mut from_new = Limiter::new();
+
+        from_default.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+        from_new.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+
+        // A limiter built with a derived `Default` would have a `capsc` of
+        // zero and would leave the signal completely alone, so a loud signal
+        // must still be attenuated here.
+        for n in 0..1000 {
+            let input = (n as f64 * 0.01).sin() * 2.0;
+            let (default_left, default_right) = from_default.process(input, -input);
+            let (new_left, new_right) = from_new.process(input, -input);
+
+            assert_eq!(default_left, new_left, "left diverged at {n}");
+            assert_eq!(default_right, new_right, "right diverged at {n}");
+        }
+
+        assert!(from_default.process(2.0, 2.0).0 < 2.0);
+    }
+
+    #[test]
+    fn the_rms_window_has_no_effect_on_the_first_init() {
+        // The original computes `rmscoef` from `rmstime` before assigning it,
+        // so on a first `init` the coefficient is zero and the RMS window has
+        // no effect at all. A refactor that fixes the ordering would change
+        // the sound, so the quirk is pinned here.
+        let mut short_window = Limiter::new();
+        let mut long_window = Limiter::new();
+
+        short_window.init(SRATE, 0.0, 70.0, 1.0, 0.0);
+        long_window.init(SRATE, 0.0, 70.0, 500.0, 0.0);
+
+        for n in 0..5000 {
+            let input = (n as f64 * 0.01).sin() * 2.0;
+            let (short_left, short_right) = short_window.process(input, -input);
+            let (long_left, long_right) = long_window.process(input, -input);
+
+            assert_eq!(short_left, long_left, "left diverged at {n}");
+            assert_eq!(short_right, long_right, "right diverged at {n}");
         }
     }
 }

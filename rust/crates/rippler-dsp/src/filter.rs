@@ -102,8 +102,10 @@ impl Filter {
     /// The magnitude of this filter's response at `freq`, computed directly
     /// from its coefficients.
     ///
-    /// Used by the tests to check the difference equation against theory.
-    pub fn magnitude_at(&self, srate: f64, freq: f64) -> f64 {
+    /// This exists for the tests within this crate, which check the
+    /// difference equation against theory.
+    #[allow(dead_code)]
+    pub(crate) fn magnitude_at(&self, srate: f64, freq: f64) -> f64 {
         let w = std::f64::consts::TAU * freq / srate;
         let (sin_w, cos_w) = w.sin_cos();
         let (sin_2w, cos_2w) = (2.0 * w).sin_cos();

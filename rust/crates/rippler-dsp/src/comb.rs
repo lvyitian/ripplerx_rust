@@ -40,7 +40,16 @@ impl Comb {
     }
 
     /// Processes one sample and returns the left and right outputs.
+    ///
+    /// If [`Comb::init`] has not been called yet there is no delay line to
+    /// read from. The C++ original is undefined behaviour in that state, so
+    /// rather than panicking on the audio thread this passes the input
+    /// through unchanged on both channels.
     pub fn process(&mut self, input: f64) -> (f64, f64) {
+        if self.buf.is_empty() {
+            return (input, input);
+        }
+
         self.buf[self.pos] = input;
         self.pos = (self.pos + 1) % self.buf.len();
 
@@ -82,6 +91,22 @@ mod tests {
 
         assert!((last.0 - 1.33).abs() < 1e-12, "left was {}", last.0);
         assert!((last.1 - 0.67).abs() < 1e-12, "right was {}", last.1);
+    }
+
+    #[test]
+    fn processing_before_init_passes_the_input_through_unchanged() {
+        // The C++ original has an empty delay line here and is undefined
+        // behaviour; the Rust port must not panic on the audio thread.
+        let mut comb = Comb::new();
+        assert_eq!(comb.delay_len(), 0);
+
+        let (left, right) = comb.process(0.5);
+        assert_eq!(left, 0.5);
+        assert_eq!(right, 0.5);
+
+        let (left, right) = comb.process(-0.25);
+        assert_eq!(left, -0.25);
+        assert_eq!(right, -0.25);
     }
 
     #[test]

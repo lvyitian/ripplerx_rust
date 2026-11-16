@@ -106,4 +106,53 @@ mod tests {
         let mean = sum / count as f64;
         assert!(mean.abs() < 0.02, "mean was {mean}");
     }
+
+    #[test]
+    fn a_known_seed_produces_the_expected_values() {
+        // Golden values for seed 42. They were obtained by re-implementing the
+        // xorshift64* step independently of this crate, from the algorithm
+        // documented in the module header:
+        //
+        //     x ^= x >> 12;
+        //     x ^= x << 25;
+        //     x ^= x >> 27;
+        //     output = x * 0x2545F4914F6CDD1D
+        //
+        // with the state starting at the seed, and the unit value being
+        // `(output >> 11) / 2^53`. Pinning the exact numbers means a future
+        // refactor of the generator cannot silently change the sound.
+        let mut rng = Rng::new(42);
+
+        let expected_u64 = [
+            6_255_019_084_209_693_600,
+            14_430_073_426_741_505_498,
+            14_575_455_857_230_217_846,
+            17_414_512_882_241_728_735,
+        ];
+        for (index, expected) in expected_u64.iter().enumerate() {
+            assert_eq!(rng.next_u64(), *expected, "wrong value at {index}");
+        }
+
+        let mut rng = Rng::new(42);
+        let expected_unit = [
+            0.339_085_264_001_921_96,
+            0.782_255_847_919_924_3,
+            0.790_137_045_268_778_6,
+            0.944_042_634_985_164_3,
+        ];
+        for (index, expected) in expected_unit.iter().enumerate() {
+            assert_eq!(rng.next_unit(), *expected, "wrong value at {index}");
+        }
+
+        let mut rng = Rng::new(42);
+        let expected_bipolar = [
+            -0.321_829_471_996_156_1,
+            0.564_511_695_839_848_6,
+            0.580_274_090_537_557_2,
+            0.888_085_269_970_328_6,
+        ];
+        for (index, expected) in expected_bipolar.iter().enumerate() {
+            assert_eq!(rng.next_bipolar(), *expected, "wrong value at {index}");
+        }
+    }
 }

@@ -314,4 +314,111 @@ mod tests {
         // full scale. The sustain level never reaches true silence.
         assert!((env.env - 0.001).abs() < 1e-9, "sustain was {}", env.env);
     }
+
+    /// Returns the level after each of the first `steps` samples of an
+    /// attack, for an envelope built with the given tensions.
+    fn attack_curve(tension_a: f64, tension_d: f64, tension_r: f64, steps: usize) -> Vec<f64> {
+        let mut env = Envelope::new();
+        env.init(
+            SRATE, 5.0, 50.0, -30.0, 100.0, tension_a, tension_d, tension_r,
+        );
+        env.attack(1.0);
+
+        let mut curve = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            env.process();
+            curve.push(env.env);
+        }
+        curve
+    }
+
+    /// The number of samples the attack takes to reach half of the scale.
+    fn samples_to_half(curve: &[f64]) -> usize {
+        curve
+            .iter()
+            .position(|level| *level >= 0.5)
+            .expect("the attack never reached half of the scale")
+    }
+
+    #[test]
+    fn the_slow_start_shape_differs_from_the_fast_start_shape() {
+        // A tension argument of zero normalises to 100, which is greater than
+        // one, so every stage takes the slow-start branch. A negative tension
+        // for the attack (and a positive one for the decay and the release,
+        // which are negated on the way in) normalises to a value below one,
+        // so those take the fast-start branch.
+        let slow = attack_curve(0.0, 0.0, 0.0, 400);
+        let fast = attack_curve(-0.5, 0.5, 0.5, 400);
+
+        // The slow-start curve starts from a lower level, and accelerates
+        // towards the target instead of jumping at it.
+        assert!(
+            slow[0] < fast[0],
+            "slow started at {} and fast at {}",
+            slow[0],
+            fast[0]
+        );
+
+        // The fast-start curve reaches half of the scale much sooner.
+        assert!(
+            samples_to_half(&fast) < samples_to_half(&slow),
+            "fast took {} samples and slow took {}",
+            samples_to_half(&fast),
+            samples_to_half(&slow)
+        );
+
+        // The fast-start attack is a decaying inverse exponential, so its
+        // steps shrink.
+        for index in 2..100 {
+            assert!(
+                fast[index] - fast[index - 1] < fast[index - 1] - fast[index - 2],
+                "the fast-start attack did not decelerate at {index}"
+            );
+        }
+
+        // The slow-start attack is a rising exponential, so its steps grow.
+        for index in 2..100 {
+            assert!(
+                slow[index] - slow[index - 1] >= slow[index - 1] - slow[index - 2],
+                "the slow-start attack did not accelerate at {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_slow_start_envelope_runs_through_every_stage() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 5.0, 50.0, -30.0, 100.0, 0.0, 0.0, 0.0);
+        env.attack(1.0);
+
+        let mut stage = Stage::Attack;
+        for _ in 0..10_000 {
+            stage = env.process();
+            if stage != Stage::Attack {
+                break;
+            }
+        }
+        assert_eq!(stage, Stage::Decay);
+
+        for _ in 0..100_000 {
+            stage = env.process();
+            if stage != Stage::Decay {
+                break;
+            }
+        }
+        assert_eq!(stage, Stage::Sustain);
+        assert!((env.env - 0.031_622_776_601_683_8).abs() < 1e-3);
+
+        env.release();
+        assert_eq!(env.state, Stage::Release);
+
+        for _ in 0..100_000 {
+            stage = env.process();
+            if stage != Stage::Release {
+                break;
+            }
+        }
+        assert_eq!(stage, Stage::Off);
+        assert_eq!(env.env, 0.0);
+    }
 }

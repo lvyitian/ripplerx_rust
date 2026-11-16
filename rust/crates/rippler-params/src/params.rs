@@ -25,15 +25,15 @@ use crate::enums::{Coupling, NoiseFilterMode, PartialCount};
 use crate::ranges;
 
 /// The number of mallet choices, `mallet_type`.
-const MALLET_CHOICES: f32 = 26.0;
+const MALLET_CHOICES: f64 = 26.0;
 /// The number of model choices, `a_model` and `b_model`.
-const MODEL_CHOICES: f32 = 12.0;
+const MODEL_CHOICES: f64 = 12.0;
 /// The number of partial choices, `a_partials` and `b_partials`.
-const PARTIAL_CHOICES: f32 = 7.0;
+const PARTIAL_CHOICES: f64 = 7.0;
 /// The number of noise filter choices, `noise_filter_mode`.
-const FILTER_MODE_CHOICES: f32 = 3.0;
+const FILTER_MODE_CHOICES: f64 = 3.0;
 /// The number of coupling choices, `couple`.
-const COUPLING_CHOICES: f32 = 2.0;
+const COUPLING_CHOICES: f64 = 2.0;
 
 /// The kind of a parameter, which decides how a legacy value is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,13 +62,13 @@ pub(crate) struct ParameterSpec {
     /// The default value, plain and unnormalised.
     pub(crate) default: f64,
     /// The lowest legal value.
-    pub(crate) min: f32,
+    pub(crate) min: f64,
     /// The highest legal value.
-    pub(crate) max: f32,
+    pub(crate) max: f64,
     /// JUCE's skew, if the parameter has one.
     pub(crate) skew: Option<f32>,
     /// JUCE's interval, if the parameter has one.
-    pub(crate) step: Option<f32>,
+    pub(crate) step: Option<f64>,
 }
 
 /// Every parameter, in the order the groups hold them.
@@ -860,12 +860,12 @@ pub(crate) fn spec(id: &str) -> Option<&'static ParameterSpec> {
 fn float_param(id: &str) -> FloatParam {
     let spec = spec(id).expect("the parameter has a specification");
     let range = match spec.skew {
-        Some(skew) => ranges::skewed(spec.min, spec.max, skew),
-        None => ranges::linear(spec.min, spec.max),
+        Some(skew) => ranges::skewed(spec.min as f32, spec.max as f32, skew),
+        None => ranges::linear(spec.min as f32, spec.max as f32),
     };
     let param = FloatParam::new(spec.name, spec.default as f32, range);
     match spec.step {
-        Some(step) => param.with_step_size(step),
+        Some(step) => param.with_step_size(step as f32),
         None => param,
     }
 }
@@ -1883,7 +1883,7 @@ mod tests {
     fn the_specifications_match_the_parameters() {
         for spec in SPECS {
             assert!(spec.min < spec.max, "{} has an empty range", spec.id);
-            let default = spec.default as f32;
+            let default = spec.default;
             assert!(
                 default >= spec.min && default <= spec.max,
                 "{} has a default outside its range",

@@ -11,5 +11,6 @@
 #![deny(missing_docs)]
 
 pub mod enums;
+pub mod legacy;
 pub mod params;
 pub mod ranges;

@@ -104,17 +104,24 @@ impl<'a> Tension<'a> {
 
 impl Widget for Tension<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(TENSION_SIZE, TENSION_SIZE), Sense::click_and_drag());
+        let (rect, _) = ui.allocate_exact_size(vec2(TENSION_SIZE, TENSION_SIZE), Sense::hover());
+        self.ui_at(ui, rect)
+    }
+}
+
+impl Tension<'_> {
+    /// Draws the control in a rectangle.
+    pub(crate) fn ui_at(&self, ui: &mut Ui, rect: Rect) -> Response {
+        let id = ui.make_persistent_id(("tension", self.id));
+        let response = ui.interact(rect, id, Sense::click_and_drag());
 
         let modifiers = ui.input(|input| input.modifiers);
         let normalised = self.params.normalized(self.id);
 
         // The drag is remembered in egui's memory, because the control is
         // built again every frame.
-        let memory = ui.next_auto_id().with(("tension", self.id));
-        let start_id = memory.with("start");
-        let sum_id = memory.with("sum");
+        let start_id = id.with("start");
+        let sum_id = id.with("sum");
 
         if response.drag_started() {
             self.params.begin(self.id);

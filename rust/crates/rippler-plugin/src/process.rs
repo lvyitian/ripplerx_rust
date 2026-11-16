@@ -231,6 +231,7 @@ impl RipplerX {
             noise_res_range,
             tuning,
             meter,
+            repaint_notifier,
             ..
         } = self;
 
@@ -434,7 +435,13 @@ impl RipplerX {
         let samples = num_samples * num_channels.max(1);
         if samples > 0 {
             let rms = (rms_sum / samples as f64).sqrt() as f32;
+            let previous = meter.load(std::sync::atomic::Ordering::Relaxed);
             meter.store(rms, std::sync::atomic::Ordering::Relaxed);
+            // The meter of the editor follows the level, so the editor has to
+            // be redrawn when the level changes.
+            if previous != rms {
+                repaint_notifier.request_repaint();
+            }
         }
     }
 }

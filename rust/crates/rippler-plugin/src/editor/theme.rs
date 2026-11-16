@@ -58,6 +58,20 @@ impl Theme {
         *self == Self::DARK
     }
 
+    /// The theme with every colour half as opaque.
+    ///
+    /// The JUCE build dims the parts of a resonator that is switched off.
+    pub fn dimmed(&self) -> Theme {
+        Theme {
+            background: dimmed(self.background),
+            neutral: dimmed(self.neutral),
+            neutral_light: dimmed(self.neutral_light),
+            active: dimmed(self.active),
+            velocity: dimmed(self.velocity),
+            shadow: dimmed(self.shadow),
+        }
+    }
+
     /// The colour of the text on top of the active colour.
     ///
     /// The JUCE build uses white on the light theme and a very dark shade of
@@ -69,6 +83,16 @@ impl Theme {
             Color32::WHITE
         }
     }
+}
+
+/// Halves the opacity of a colour.
+fn dimmed(colour: Color32) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        colour.r(),
+        colour.g(),
+        colour.b(),
+        (colour.a() as f32 * 0.5) as u8,
+    )
 }
 
 /// Darkens a colour the way JUCE's `Colour::darker` does.

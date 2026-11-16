@@ -104,10 +104,10 @@ impl Widget for Meter {
             elapsed.push(0);
         }
 
-        let rms = level(self.level);
+        let lit_count = lit_bulbs(self.level);
         let mut lit = [false; TOTAL_BULBS];
-        for index in 0..TOTAL_BULBS {
-            let on = rms >= (index + 1) as f32 / (TOTAL_BULBS + 1) as f32 || rms >= FULL_LEVEL;
+        for (index, bulb) in lit.iter_mut().enumerate() {
+            let on = index < lit_count;
             // A bulb that was on stays on until its counter runs out.
             let was_on = elapsed[index] > 0;
             if on {
@@ -117,19 +117,19 @@ impl Widget for Meter {
             } else {
                 elapsed[index] -= 1;
             }
-            lit[index] = on || was_on;
+            *bulb = on || was_on;
         }
         ui.memory_mut(|memory| memory.data.insert_temp(id, elapsed.clone()));
 
         // The bulbs are stacked from the bottom up.
         let bulb_height = rect.height() / TOTAL_BULBS as f32;
-        for index in 0..TOTAL_BULBS {
+        for (index, bulb) in lit.iter().enumerate() {
             let top = rect.bottom() - bulb_height * (index + 1) as f32;
             let bounds = Rect::from_min_max(
                 Pos2::new(rect.left(), top),
                 Pos2::new(rect.right(), top + bulb_height),
             );
-            self.draw_bulb(ui, bounds, index, lit[index]);
+            self.draw_bulb(ui, bounds, index, *bulb);
         }
 
         response

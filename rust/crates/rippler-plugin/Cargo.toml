@@ -12,6 +12,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 egui = "0.37"
+image = { version = "0.25", default-features = false, features = ["png"] }
 mts-client-rs = "0.1.0"
 nice-plug = { version = "0.4", default-features = false, features = ["editor", "vst3"] }
 nice-plug-core = { version = "0.4", default-features = false, features = ["editor"] }

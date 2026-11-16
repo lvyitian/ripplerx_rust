@@ -9,7 +9,9 @@
 //! bottom of its range — or, for a control that is centred, not at the middle
 //! of it.
 
-use egui::{Color32, FontId, Painter, Pos2, Response, Sense, Shape, Stroke, Ui, Widget, vec2};
+use egui::{
+    Color32, FontId, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, vec2,
+};
 
 use crate::editor::Params;
 use crate::editor::theme::Theme;
@@ -25,7 +27,7 @@ pub(crate) const KNOB_WIDTH: f32 = 70.0;
 pub(crate) const KNOB_HEIGHT: f32 = 75.0;
 
 /// The radius of the knob's circle, in points.
-const RADIUS: f32 = 16.0;
+pub(crate) const RADIUS: f32 = 16.0;
 
 /// The radius of the arc around the knob, in points.
 const ARC_RADIUS: f32 = RADIUS + 2.0;
@@ -255,8 +257,21 @@ impl<'a> Knob<'a> {
 
 impl Widget for Knob<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(KNOB_WIDTH, KNOB_HEIGHT), Sense::click_and_drag());
+        let (rect, _) = ui.allocate_exact_size(vec2(KNOB_WIDTH, KNOB_HEIGHT), Sense::hover());
+        self.ui_at(ui, rect)
+    }
+}
+
+impl Knob<'_> {
+    /// Draws the knob in a rectangle.
+    ///
+    /// The mouse is only on the knob when it is on its circle, so that the
+    /// tension control that sits in the corner of a knob is not in the way.
+    pub(crate) fn ui_at(&self, ui: &mut Ui, rect: Rect) -> Response {
+        let centre = rect.center() + vec2(0.0, -4.0);
+        let circle = Rect::from_center_size(centre, vec2(RADIUS * 2.0, RADIUS * 2.0));
+        let id = ui.make_persistent_id(("knob", self.id));
+        let response = ui.interact(circle, id, Sense::click_and_drag());
 
         let modifiers = ui.input(|input| input.modifiers);
         let shift = modifiers.shift;
@@ -267,9 +282,8 @@ impl Widget for Knob<'_> {
 
         // The drag is remembered in egui's memory, because the knob is built
         // again every frame and cannot keep the state of the drag itself.
-        let memory = ui.next_auto_id().with(("knob", self.id));
-        let start_id = memory.with("start");
-        let sum_id = memory.with("sum");
+        let start_id = id.with("start");
+        let sum_id = id.with("sum");
 
         if response.drag_started() {
             self.params.begin(target);

@@ -195,8 +195,7 @@ impl<'a> Pitch<'a> {
 
     /// Writes the values the control has.
     fn write(&self, change: &PitchChange) {
-        for index in 0..change.written {
-            let (target, value) = change.writes[index];
+        for (target, value) in change.writes.iter().take(change.written).copied() {
             let id = match target {
                 PitchTarget::Coarse => self.coarse,
                 PitchTarget::Fine => self.fine.unwrap_or(self.coarse),

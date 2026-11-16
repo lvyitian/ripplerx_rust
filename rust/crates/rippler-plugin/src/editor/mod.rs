@@ -13,6 +13,7 @@
 
 pub mod knob;
 pub mod meter;
+pub mod panels;
 pub mod pitch;
 pub mod settings;
 pub mod tension;
@@ -20,7 +21,7 @@ pub mod theme;
 
 use nice_plug::util::AtomicF32;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use egui::{Context, Ui};
@@ -39,6 +40,24 @@ use crate::editor::theme::Theme;
 ///
 /// The JUCE editor is 650 by 485.
 pub const EDITOR_SIZE: LogicalSize<f32> = LogicalSize::new(650.0, 485.0);
+
+/// The font of the JUCE build.
+static UBUNTU_MEDIUM: &[u8] = include_bytes!("../../../../../resources/Ubuntu-Medium.ttf");
+
+/// Sets the font of the editor.
+///
+/// The JUCE build uses the font of the plugin as its default typeface.
+fn set_font(context: &Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        String::from("ubuntu"),
+        std::sync::Arc::new(egui::FontData::from_static(UBUNTU_MEDIUM)),
+    );
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(0, String::from("ubuntu"));
+    }
+    context.set_fonts(fonts);
+}
 
 /// The plugin's parameters, by their legacy identifier.
 ///
@@ -218,8 +237,9 @@ pub struct EditorState {
     /// Whether the velocity edit mode is on.
     ///
     /// The JUCE build keeps this in its processor as well, and does not save
-    /// it: it is a mode of the editor, not a setting of the plugin.
-    velocity_mode: bool,
+    /// it: it is a mode of the editor, not a setting of the plugin. It is
+    /// an atomic, because the editor changes it while it draws itself.
+    velocity_mode: Arc<AtomicBool>,
     /// The meter's value, shared with the audio thread.
     meter: Arc<AtomicF32>,
 }
@@ -236,7 +256,7 @@ impl EditorState {
             params,
             settings,
             polyphony,
-            velocity_mode: false,
+            velocity_mode: Arc::new(AtomicBool::new(false)),
             meter,
         }
     }
@@ -262,13 +282,13 @@ impl EditorState {
     }
 
     /// Whether the velocity edit mode is on.
-    pub fn velocity_mode(&self) -> bool {
-        self.velocity_mode
+    pub fn velocity_mode(&self) -> &Arc<AtomicBool> {
+        &self.velocity_mode
     }
 
     /// Turns the velocity edit mode on or off.
-    pub fn set_velocity_mode(&mut self, on: bool) {
-        self.velocity_mode = on;
+    pub fn set_velocity_mode(&self, on: bool) {
+        self.velocity_mode.store(on, Ordering::Relaxed);
     }
 
     /// The theme the editor is drawn in.
@@ -291,8 +311,11 @@ struct OpenState {
     /// It is held so that egui can clean up when the editor is closed.
     _context: Context,
     /// The context the plugin hands to the editor.
-    #[allow(dead_code)]
     gui: GuiContext,
+    /// The plugin's parameters, by their identifier.
+    parameters: Parameters,
+    /// The images of the editor.
+    images: panels::Images,
 }
 
 /// The editor application.
@@ -320,9 +343,17 @@ impl NiceEguiApp for RipplerEditor {
         nice_gui_ctx: GuiContext,
         _frame: &mut Frame,
     ) -> Result<(), HandlerError> {
+        // The font of the JUCE build is the one of the plugin, and the
+        // images are decoded once, when the editor opens.
+        set_font(&egui_ctx);
+        let images = panels::Images::load(&egui_ctx);
+        let parameters = Parameters::new(self.state.params());
+
         self.open = Some(OpenState {
             _context: egui_ctx,
             gui: nice_gui_ctx,
+            parameters,
+            images,
         });
         Ok(())
     }
@@ -332,10 +363,35 @@ impl NiceEguiApp for RipplerEditor {
         ui.painter()
             .rect_filled(ui.max_rect(), 0.0, theme.background);
 
-        // The panels are built in the tasks that follow; for now the editor
-        // shows the theme it is drawn in, so that the plumbing can be seen
-        // working.
-        ui.label("RipplerX");
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+
+        let setter = open.gui.param_setter();
+        let params = Params::new(&open.parameters, &setter);
+
+        let panels = panels::Panels {
+            params: &params,
+            theme,
+            velocity_mode: self.state.velocity_mode().load(Ordering::Relaxed),
+            images: &open.images,
+            meter: self.state.meter().load(Ordering::Relaxed),
+            settings: self.state.settings(),
+            polyphony: self.state.polyphony(),
+            velocity: self.state.velocity_mode(),
+        };
+
+        panels::top_bar(ui, &panels);
+
+        ui.horizontal_top(|ui| {
+            panels::noise_section(ui, &panels);
+            panels::mallet_section(ui, &panels);
+            ui.vertical(|ui| {
+                panels::resonator_section(ui, &panels, &panels::resonator_a());
+                panels::resonator_section(ui, &panels, &panels::resonator_b());
+            });
+            panels::coupling_section(ui, &panels);
+        });
     }
 
     fn editor_closed(&mut self) {
@@ -373,9 +429,9 @@ mod tests {
 
     #[test]
     fn the_velocity_mode_is_off_until_it_is_turned_on() {
-        let mut state = state();
-        assert!(!state.velocity_mode());
+        let state = state();
+        assert!(!state.velocity_mode().load(Ordering::Relaxed));
         state.set_velocity_mode(true);
-        assert!(state.velocity_mode());
+        assert!(state.velocity_mode().load(Ordering::Relaxed));
     }
 }

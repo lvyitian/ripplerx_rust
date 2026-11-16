@@ -11,4 +11,5 @@
 #![deny(missing_docs)]
 
 pub mod enums;
+pub mod params;
 pub mod ranges;

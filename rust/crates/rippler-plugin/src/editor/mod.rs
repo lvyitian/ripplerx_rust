@@ -12,6 +12,8 @@
 //! window is open.
 
 pub mod knob;
+pub mod meter;
+pub mod pitch;
 pub mod settings;
 pub mod tension;
 pub mod theme;
@@ -169,6 +171,22 @@ impl<'a> Params<'a> {
             self.setter
                 .raw_context
                 .raw_set_parameter_normalized(pointer, snapped);
+        }
+    }
+
+    /// Tells the host that a parameter has a new plain value.
+    pub fn set_plain(&self, id: &str, value: f64) {
+        let Some(pointer) = self.parameters.pointer(id) else {
+            return;
+        };
+        // SAFETY: the pointer comes from the plugin's own parameter map, so
+        // the parameter exists. The value is snapped to the parameter's step
+        // size first, the way JUCE's `setValueNotifyingHost` does.
+        unsafe {
+            let normalized = pointer.preview_normalized(value as f32);
+            self.setter
+                .raw_context
+                .raw_set_parameter_normalized(pointer, normalized);
         }
     }
 

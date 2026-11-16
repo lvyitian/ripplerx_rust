@@ -1,0 +1,10 @@
+[package]
+name = "rippler-params"
+description = "Parameter definitions and legacy state compatibility for RipplerX"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -230,6 +230,7 @@ impl RipplerX {
             noise_mix_range,
             noise_res_range,
             tuning,
+            meter,
             ..
         } = self;
 
@@ -241,7 +242,10 @@ impl RipplerX {
         };
 
         let srate = *srate;
-        let polyphony = (*polyphony).min(voices.len()).min(rngs.len());
+        let polyphony = polyphony
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(voices.len())
+            .min(rngs.len());
 
         // The messages that were handled in an earlier block are dropped.
         midi.queue.retain(|msg| msg.offset >= 0);
@@ -256,6 +260,10 @@ impl RipplerX {
         // and the plugin sums that, where the C++ sums zero channels.
         let channels = buffer.as_slice();
         let num_channels = channels.len();
+
+        // The sum of the squares of the output, which becomes the meter's
+        // level at the end of the block.
+        let mut rms_sum = 0.0f64;
 
         for sample in 0..num_samples {
             // The pitch bend glides one sample towards its target.
@@ -417,6 +425,16 @@ impl RipplerX {
             {
                 channel[sample] = right as f32;
             }
+
+            // The meter's level is the root mean square of the output, the
+            // way the JUCE build's `getRMSLevel` measures it.
+            rms_sum += left * left + right * right;
+        }
+
+        let samples = num_samples * num_channels.max(1);
+        if samples > 0 {
+            let rms = (rms_sum / samples as f64).sqrt() as f32;
+            meter.store(rms, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

@@ -5,6 +5,7 @@
 //! runs.
 
 pub mod block_params;
+pub mod editor;
 pub mod identity;
 pub mod params;
 pub mod process;
@@ -15,6 +16,8 @@ pub(crate) mod test_helpers;
 
 use mts_client_rs::Client;
 use nice_plug::prelude::*;
+use nice_plug::util::AtomicF32;
+use nice_plug_egui::{EguiEditor, EguiEditorState, EguiNiceSettings, RepaintNotifier};
 use rippler_dsp::comb::Comb;
 use rippler_dsp::limiter::Limiter;
 use rippler_dsp::luts::Luts;
@@ -24,8 +27,10 @@ use rippler_dsp::rng::Rng;
 use rippler_dsp::sampler::Sampler;
 use rippler_dsp::voice::Voice;
 use rippler_params::params::RipplerParams;
-use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
+use crate::editor::{EDITOR_SIZE, EditorState, RipplerEditor};
 use crate::params::{MALLET_TYPE_COUNT, ParamState, PreparedSample, prepare_internal_samples};
 use crate::process::{MIDI_QUEUE_CAPACITY, MidiState};
 
@@ -70,7 +75,10 @@ pub struct RipplerX {
     /// The sample rate.
     srate: f64,
     /// The number of voices in use.
-    polyphony: usize,
+    ///
+    /// The editor can change it, so it is shared with the audio thread
+    /// through an atomic: the audio thread may not lock a mutex.
+    polyphony: Arc<AtomicUsize>,
     /// The state of the MIDI input.
     midi: MidiState,
     /// The state of the parameters that have been applied to the voices.
@@ -96,6 +104,15 @@ pub struct RipplerX {
     /// The client is created on the thread that builds the plugin, which is
     /// not the audio thread, and it is dropped with the plugin.
     tuning: Option<Client>,
+    /// The state of the editor, which the plugin hands to the editor when
+    /// the editor is opened.
+    editor_state: Arc<EguiEditorState>,
+    /// The handle the audio thread uses to ask the editor to repaint.
+    repaint_notifier: RepaintNotifier,
+    /// The editor itself, until the editor is opened for the first time.
+    editor: Option<RipplerEditor>,
+    /// The meter's value, shared with the audio thread.
+    meter: Arc<AtomicF32>,
 }
 
 impl Default for RipplerX {
@@ -107,8 +124,27 @@ impl Default for RipplerX {
     /// the expensive part, so they are not built at all until the plugin is
     /// activated.
     fn default() -> Self {
+        let params = Arc::new(RipplerParams::default());
+        let settings = Arc::new(Mutex::new(crate::editor::settings::load()));
+        let polyphony = Arc::new(AtomicUsize::new(
+            settings
+                .lock()
+                .map(|settings| settings.polyphony)
+                .unwrap_or(DEFAULT_POLYPHONY),
+        ));
+        let meter = Arc::new(AtomicF32::new(0.0));
+
+        let editor_state = EguiEditorState::from_size(EDITOR_SIZE, 1.0);
+        let repaint_notifier = RepaintNotifier::new();
+        let editor = RipplerEditor::new(EditorState::new(
+            params.clone(),
+            settings.clone(),
+            polyphony.clone(),
+            meter.clone(),
+        ));
+
         Self {
-            params: Arc::new(RipplerParams::default()),
+            params,
             voices: Vec::new(),
             sampler: Sampler::new(),
             models: ModelTables::new(),
@@ -120,7 +156,7 @@ impl Default for RipplerX {
             limiter: Limiter::new(44100.0),
             rngs: Vec::new(),
             srate: 44100.0,
-            polyphony: DEFAULT_POLYPHONY,
+            polyphony,
             midi: MidiState::default(),
             params_state: ParamState::default(),
             noise_mix_range: FloatRange::Linear { min: 0.0, max: 1.0 },
@@ -130,6 +166,10 @@ impl Default for RipplerX {
             // The client is optional: without the MTS-ESP library the
             // plugin falls back to the equal temperament.
             tuning: Client::new().ok(),
+            editor_state,
+            repaint_notifier,
+            editor: Some(editor),
+            meter,
         }
     }
 }
@@ -163,13 +203,27 @@ impl Plugin for RipplerX {
 
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
 
-    /// The editor comes with the next plan.
-    type Editor = ();
+    /// The editor is the egui editor of the `editor` module.
+    type Editor = EguiEditor<RipplerEditor>;
     type SysExMessage = ();
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    /// Opens the editor.
+    ///
+    /// The editor is built once, when the plugin is built, and is handed over
+    /// here. The host may open and close the editor window several times,
+    /// and the editor keeps its state between them.
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
+        nice_plug_egui::create_egui_editor(
+            self.editor_state.clone(),
+            self.repaint_notifier.clone(),
+            EguiNiceSettings::new().with_tile("RipplerX"),
+            self.editor.take()?,
+        )
     }
 
     fn activate(

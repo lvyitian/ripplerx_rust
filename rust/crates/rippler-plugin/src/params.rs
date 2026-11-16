@@ -183,7 +183,10 @@ impl RipplerX {
         let resonator_a = block.resonator_a_settings();
         let resonator_b = block.resonator_b_settings();
         let bend = self.midi.bend.current;
-        let polyphony = self.polyphony.min(self.voices.len());
+        let polyphony = self
+            .polyphony
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(self.voices.len());
 
         for voice in self.voices.iter_mut().take(polyphony) {
             voice.noise.init(self.srate, &noise_settings);

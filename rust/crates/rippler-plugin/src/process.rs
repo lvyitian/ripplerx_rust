@@ -571,7 +571,7 @@ impl RipplerX {
         } = self;
 
         let srate = *srate;
-        let polyphony = (*polyphony).min(voices.len());
+        let polyphony = (*polyphony).min(voices.len()).min(rngs.len());
 
         // The messages that were handled in an earlier block are dropped.
         midi.queue.retain(|msg| msg.offset >= 0);
@@ -796,7 +796,9 @@ fn handle_message(
         MidiMsgType::NoteOff => {
             if !*sustain_pedal {
                 off_note(msg, voices, models, release_count, polyphony);
-            } else {
+            } else if sustain_pedal_notes.len() < MIDI_QUEUE_CAPACITY {
+                // The list never grows beyond its capacity, so that the
+                // audio thread never allocates.
                 sustain_pedal_notes.push(msg);
             }
         }
@@ -891,7 +893,14 @@ fn set_bend_target(bend: &mut Bend, pitch_wheel: f64, bend_range: f64) {
     bend.start = bend.current;
     bend.target = 2.0f64.powf(normalized * bend_range / 12.0);
     bend.remaining = bend.total;
-    bend.step = (bend.target - bend.start) / bend.total as f64;
+
+    // The glide time is the number of samples the bend takes, so the step
+    // is the difference between the two bends over that time.
+    bend.step = if bend.total > 0 {
+        (bend.target - bend.start) / bend.total as f64
+    } else {
+        0.0
+    };
 }
 
 #[cfg(test)]

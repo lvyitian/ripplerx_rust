@@ -201,7 +201,7 @@ impl RipplerX {
         // The MIDI queue is allocated once, so that the audio thread never
         // allocates.
         self.midi.queue.reserve(MIDI_QUEUE_CAPACITY);
-        self.midi.sustain_pedal_notes.reserve(MAX_POLYPHONY);
+        self.midi.sustain_pedal_notes.reserve(MIDI_QUEUE_CAPACITY);
 
         // The pitch bend glides over two milliseconds.
         self.midi.bend.total = (BEND_GLIDE_MS * 0.001 * self.srate) as i64;

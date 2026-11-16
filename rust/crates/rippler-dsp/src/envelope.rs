@@ -3,7 +3,8 @@
 //! Port of `src/dsp/Envelope.{h,cpp}`, which is a port of Envlib (by dwelx)
 //! based on zenvelib.v1.
 //!
-//! The sustain level is expressed in decibels, matching the C++.
+//! The sustain level is given to [`Envelope::init`] in decibels and stored as
+//! a linear gain, matching the C++.
 
 /// The stage an envelope is currently in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,7 +29,10 @@ pub struct Envelope {
     pub att: f64,
     /// Decay time in samples.
     pub dec: f64,
-    /// Sustain level as a linear gain.
+    /// The sustain level as a linear gain.
+    ///
+    /// [`Envelope::init`] takes the sustain level in decibels and converts it
+    /// into this linear gain.
     pub sus: f64,
     /// Release time in samples.
     pub rel: f64,
@@ -48,6 +52,7 @@ pub struct Envelope {
     ta: f64,
     td: f64,
     tr: f64,
+    initialised: bool,
 }
 
 /// Maps a tension in `[-1, 1]` onto the internal range `[0.001..1, 100]`.
@@ -119,6 +124,8 @@ impl Envelope {
         self.ta = normalize_tension(tension_a);
         self.td = normalize_tension(-tension_d);
         self.tr = normalize_tension(-tension_r);
+
+        self.initialised = true;
     }
 
     /// Recomputes the attack and decay coefficients for the current scale.
@@ -146,7 +153,16 @@ impl Envelope {
     }
 
     /// Starts the attack stage towards `scale`.
+    ///
+    /// An envelope that has not been configured by [`Envelope::init`] has no
+    /// attack rate, and starting it would divide by a zero rate and jump
+    /// straight to full scale. The attack is therefore ignored and the
+    /// envelope stays off until it has been initialised.
     pub fn attack(&mut self, scale: f64) {
+        if !self.initialised {
+            return;
+        }
+
         self.scale = scale;
         self.recalc_coefs();
         self.state = Stage::Attack;
@@ -220,6 +236,40 @@ mod tests {
         let mut env = Envelope::new();
         env.init(SRATE, 1.0, 10.0, -30.0, 10.0, 0.4, 0.4, 0.4);
         assert!((env.sus - 0.031_622_776_601_683_8).abs() < 1e-15);
+    }
+
+    #[test]
+    fn attacking_an_uninitialised_envelope_does_nothing() {
+        // Without an `init` call there is no attack rate, and starting the
+        // attack would divide by a zero rate and jump straight to full
+        // scale, which is a loud click on the audio thread.
+        let mut env = Envelope::new();
+        env.attack(1.0);
+
+        assert_eq!(env.state, Stage::Off);
+        assert_eq!(env.env, 0.0);
+
+        // The envelope stays off until it is initialised.
+        for _ in 0..1000 {
+            assert_eq!(env.process(), Stage::Off);
+        }
+        assert_eq!(env.env, 0.0);
+    }
+
+    #[test]
+    fn an_initialised_envelope_still_attacks() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 5.0, 50.0, -30.0, 100.0, 0.0, 0.0, 0.0);
+        env.attack(1.0);
+
+        assert_eq!(env.state, Stage::Attack);
+
+        let mut previous = env.env;
+        for _ in 0..100 {
+            env.process();
+            assert!(env.env > previous, "the attack did not rise");
+            previous = env.env;
+        }
     }
 
     #[test]

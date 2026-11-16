@@ -34,12 +34,19 @@ impl Limiter {
     /// `ln(10) / 20`.
     const DB2LOG: f64 = 0.115_129_254_649_702_284_200_899_572_734_22;
 
-    /// Creates an uninitialised limiter. Call [`Limiter::init`] before use.
+    /// Creates a limiter configured with the defaults the plugin uses.
     ///
-    /// This is the same value as [`Limiter::default`]: the two conversion
-    /// constants are filled in, so that `init` computes a usable `capsc`.
-    pub fn new() -> Self {
-        Self {
+    /// The limiter is initialised with a threshold of 0 dB, a bias of 70%, an
+    /// RMS window of 100 ms and no makeup gain, so it is usable straight away
+    /// and cannot produce `NaN`. Call [`Limiter::init`] to reconfigure it.
+    ///
+    /// This is the same output as the C++ default-constructed limiter
+    /// followed by a single `init` call with those parameters: `init` reads
+    /// the RMS window before assigning it, so the RMS coefficient is zero on
+    /// that first call, and it is zero here as well. The limiter therefore
+    /// behaves identically to the original from the very first sample.
+    pub fn new(srate: f64) -> Self {
+        let mut limiter = Self {
             log2db: Self::LOG2DB,
             db2log: Self::DB2LOG,
             rundb: 0.0,
@@ -57,7 +64,18 @@ impl Limiter {
             relcoef: 0.0,
             rmstime: 0.0,
             rmscoef: 0.0,
-        }
+        };
+
+        limiter.init(srate, 0.0, 70.0, 100.0, 0.0);
+
+        // `init` reads `rmstime` before assigning it, so the RMS coefficient
+        // of this first configuration is zero. Clearing `rmstime` keeps that
+        // "first configuration" property for any later `init` call, which
+        // makes `new` followed by `init` behave exactly like the C++'s
+        // default-constructed limiter followed by a single `init`.
+        limiter.rmstime = 0.0;
+
+        limiter
     }
 
     /// Configures the limiter.
@@ -117,17 +135,6 @@ impl Limiter {
     }
 }
 
-impl Default for Limiter {
-    /// Same as [`Limiter::new`].
-    ///
-    /// A derived `Default` would leave the conversion constants at zero and
-    /// make `init` compute a `capsc` of zero, so the limiter would do
-    /// nothing. Delegating keeps the two constructors identical.
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,9 +142,7 @@ mod tests {
     const SRATE: f64 = 48_000.0;
 
     fn limiter() -> Limiter {
-        let mut limiter = Limiter::new();
-        limiter.init(SRATE, 0.0, 70.0, 100.0, 0.0);
-        limiter
+        Limiter::new(SRATE)
     }
 
     #[test]
@@ -183,7 +188,7 @@ mod tests {
 
     #[test]
     fn makeup_gain_is_applied() {
-        let mut limiter = Limiter::new();
+        let mut limiter = Limiter::new(SRATE);
         limiter.init(SRATE, 0.0, 70.0, 100.0, 6.0);
         let (left, _) = limiter.process(0.5, 0.5);
         let expected = 0.5 * 10f64.powf(6.0 / 20.0);
@@ -200,26 +205,51 @@ mod tests {
     }
 
     #[test]
-    fn the_default_limiter_behaves_like_a_new_one() {
-        let mut from_default = Limiter::default();
-        let mut from_new = Limiter::new();
+    fn a_new_limiter_is_already_initialised() {
+        // The point of the old `Default` test was that the two constructors
+        // must not disagree. `Default` is gone, so the equivalent guarantee
+        // is that `new` alone leaves the limiter configured and working.
+        let mut loud = Limiter::new(SRATE);
 
-        from_default.init(SRATE, 0.0, 70.0, 100.0, 0.0);
-        from_new.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+        // A limiter with a zero `capsc` would leave the signal completely
+        // alone, so a loud signal must still be attenuated here.
+        assert!(loud.process(2.0, 2.0).0 < 2.0);
 
-        // A limiter built with a derived `Default` would have a `capsc` of
-        // zero and would leave the signal completely alone, so a loud signal
-        // must still be attenuated here.
+        // A fresh limiter and one that has been reconfigured with the same
+        // parameters must behave identically.
+        let mut fresh = Limiter::new(SRATE);
+        let mut reconfigured = Limiter::new(SRATE);
+        reconfigured.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+
         for n in 0..1000 {
             let input = (n as f64 * 0.01).sin() * 2.0;
-            let (default_left, default_right) = from_default.process(input, -input);
-            let (new_left, new_right) = from_new.process(input, -input);
+            let (left, right) = fresh.process(input, -input);
+            let (reference_left, reference_right) = reconfigured.process(input, -input);
 
-            assert_eq!(default_left, new_left, "left diverged at {n}");
-            assert_eq!(default_right, new_right, "right diverged at {n}");
+            assert_eq!(left, reference_left, "left diverged at {n}");
+            assert_eq!(right, reference_right, "right diverged at {n}");
         }
+    }
 
-        assert!(from_default.process(2.0, 2.0).0 < 2.0);
+    #[test]
+    fn a_new_limiter_does_not_produce_nan() {
+        // The C++ leaves the ratio and the makeup gain at zero until `init`
+        // is called, which makes its output `NaN`. The Rust constructor
+        // initialises the limiter, so this cannot happen.
+        let mut limiter = Limiter::new(SRATE);
+
+        let (left, right) = limiter.process(0.5, -0.5);
+        assert!(left.is_finite(), "left was {left}");
+        assert!(right.is_finite(), "right was {right}");
+        assert!((left - 0.5).abs() < 1e-12, "left was {left}");
+        assert!((right + 0.5).abs() < 1e-12, "right was {right}");
+
+        for n in 0..1000 {
+            let input = (n as f64 * 0.01).sin() * 2.0;
+            let (left, right) = limiter.process(input, -input);
+            assert!(left.is_finite(), "left was {left}");
+            assert!(right.is_finite(), "right was {right}");
+        }
     }
 
     #[test]
@@ -228,8 +258,8 @@ mod tests {
         // so on a first `init` the coefficient is zero and the RMS window has
         // no effect at all. A refactor that fixes the ordering would change
         // the sound, so the quirk is pinned here.
-        let mut short_window = Limiter::new();
-        let mut long_window = Limiter::new();
+        let mut short_window = Limiter::new(SRATE);
+        let mut long_window = Limiter::new(SRATE);
 
         short_window.init(SRATE, 0.0, 70.0, 1.0, 0.0);
         long_window.init(SRATE, 0.0, 70.0, 500.0, 0.0);

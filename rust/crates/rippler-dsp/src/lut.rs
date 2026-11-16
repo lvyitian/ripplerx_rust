@@ -17,6 +17,7 @@ pub struct LookupTable {
     offset: f64,
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl LookupTable {
     /// Builds a table by sampling `f` at `size` evenly spaced points across
     /// `[min, max]`.
@@ -52,9 +53,10 @@ impl LookupTable {
         let input = input.clamp(self.min_value, self.max_value);
         let normalized_index = input * self.scaler + self.offset;
         let index = normalized_index.floor() as usize;
+        let last = self.values.len().saturating_sub(1);
 
-        if index >= self.values.len() - 1 {
-            return self.values[self.values.len() - 1];
+        if index >= last {
+            return self.values[last];
         }
 
         let frac = normalized_index - index as f64;
@@ -73,13 +75,14 @@ impl LookupTable {
     pub fn cubic(&self, input: f64) -> f64 {
         let input = input.clamp(self.min_value, self.max_value);
         let index = input * self.scaler + self.offset;
-        let i = (index.floor() as usize).min(self.values.len() - 1);
+        let last = self.values.len().saturating_sub(1);
+        let i = (index.floor() as usize).min(last);
         let t = index - i as f64;
 
         let i0 = i.saturating_sub(1);
         let i1 = i;
-        let i2 = (i + 1).min(self.values.len() - 1);
-        let i3 = (i + 2).min(self.values.len() - 1);
+        let i2 = (i + 1).min(last);
+        let i3 = (i + 2).min(last);
 
         let y0 = self.values[i0];
         let y1 = self.values[i1];
@@ -107,12 +110,6 @@ impl LookupTable {
     /// The number of samples in the table.
     pub fn len(&self) -> usize {
         self.values.len()
-    }
-
-    /// Whether the table holds no samples. Always false, since `new` panics
-    /// below two samples.
-    pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
     }
 
     /// The raw sample values.

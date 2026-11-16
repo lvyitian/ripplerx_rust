@@ -511,7 +511,7 @@ The implementation and the tests are written together here because the port is
 mechanical; the test is the specification of the behaviour being preserved.
 
 Run: `cd rust && cargo test -p rippler-dsp lut`
-Expected: 6 tests pass.
+Expected: 15 tests pass.
 
 - [ ] **Step 4: Verify the port against the C++**
 
@@ -670,13 +670,62 @@ mod tests {
         let mean = sum / count as f64;
         assert!(mean.abs() < 0.02, "mean was {mean}");
     }
+
+    #[test]
+    fn a_known_seed_produces_the_expected_values() {
+        // Golden values for seed 42. They were obtained by re-implementing the
+        // xorshift64* step independently of this crate, from the algorithm
+        // documented in the module header:
+        //
+        //     x ^= x >> 12;
+        //     x ^= x << 25;
+        //     x ^= x >> 27;
+        //     output = x * 0x2545F4914F6CDD1D
+        //
+        // with the state starting at the seed, and the unit value being
+        // `(output >> 11) / 2^53`. Pinning the exact numbers means a future
+        // refactor of the generator cannot silently change the sound.
+        let mut rng = Rng::new(42);
+
+        let expected_u64 = [
+            6_255_019_084_209_693_600,
+            14_430_073_426_741_505_498,
+            14_575_455_857_230_217_846,
+            17_414_512_882_241_728_735,
+        ];
+        for (index, expected) in expected_u64.iter().enumerate() {
+            assert_eq!(rng.next_u64(), *expected, "wrong value at {index}");
+        }
+
+        let mut rng = Rng::new(42);
+        let expected_unit = [
+            0.339_085_264_001_921_96,
+            0.782_255_847_919_924_3,
+            0.790_137_045_268_778_6,
+            0.944_042_634_985_164_3,
+        ];
+        for (index, expected) in expected_unit.iter().enumerate() {
+            assert_eq!(rng.next_unit(), *expected, "wrong value at {index}");
+        }
+
+        let mut rng = Rng::new(42);
+        let expected_bipolar = [
+            -0.321_829_471_996_156_1,
+            0.564_511_695_839_848_6,
+            0.580_274_090_537_557_2,
+            0.888_085_269_970_328_6,
+        ];
+        for (index, expected) in expected_bipolar.iter().enumerate() {
+            assert_eq!(rng.next_bipolar(), *expected, "wrong value at {index}");
+        }
+    }
 }
 ```
 
 - [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp rng`
-Expected: 6 tests pass.
+Expected: 7 tests pass.
 
 - [ ] **Step 4: Commit**
 
@@ -814,8 +863,10 @@ impl Filter {
     /// The magnitude of this filter's response at `freq`, computed directly
     /// from its coefficients.
     ///
-    /// Used by the tests to check the difference equation against theory.
-    pub fn magnitude_at(&self, srate: f64, freq: f64) -> f64 {
+    /// This exists for the tests within this crate, which check the
+    /// difference equation against theory.
+    #[allow(dead_code)]
+    pub(crate) fn magnitude_at(&self, srate: f64, freq: f64) -> f64 {
         let w = std::f64::consts::TAU * freq / srate;
         let (sin_w, cos_w) = w.sin_cos();
         let (sin_2w, cos_2w) = (2.0 * w).sin_cos();
@@ -1300,13 +1351,120 @@ mod tests {
         // full scale. The sustain level never reaches true silence.
         assert!((env.env - 0.001).abs() < 1e-9, "sustain was {}", env.env);
     }
+
+    /// Returns the level after each of the first `steps` samples of an
+    /// attack, for an envelope built with the given tensions.
+    fn attack_curve(tension_a: f64, tension_d: f64, tension_r: f64, steps: usize) -> Vec<f64> {
+        let mut env = Envelope::new();
+        env.init(
+            SRATE, 5.0, 50.0, -30.0, 100.0, tension_a, tension_d, tension_r,
+        );
+        env.attack(1.0);
+
+        let mut curve = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            env.process();
+            curve.push(env.env);
+        }
+        curve
+    }
+
+    /// The number of samples the attack takes to reach half of the scale.
+    fn samples_to_half(curve: &[f64]) -> usize {
+        curve
+            .iter()
+            .position(|level| *level >= 0.5)
+            .expect("the attack never reached half of the scale")
+    }
+
+    #[test]
+    fn the_slow_start_shape_differs_from_the_fast_start_shape() {
+        // A tension argument of zero normalises to 100, which is greater than
+        // one, so every stage takes the slow-start branch. A negative tension
+        // for the attack (and a positive one for the decay and the release,
+        // which are negated on the way in) normalises to a value below one,
+        // so those take the fast-start branch.
+        let slow = attack_curve(0.0, 0.0, 0.0, 400);
+        let fast = attack_curve(-0.5, 0.5, 0.5, 400);
+
+        // The slow-start curve starts from a lower level, and accelerates
+        // towards the target instead of jumping at it.
+        assert!(
+            slow[0] < fast[0],
+            "slow started at {} and fast at {}",
+            slow[0],
+            fast[0]
+        );
+
+        // The fast-start curve reaches half of the scale much sooner.
+        assert!(
+            samples_to_half(&fast) < samples_to_half(&slow),
+            "fast took {} samples and slow took {}",
+            samples_to_half(&fast),
+            samples_to_half(&slow)
+        );
+
+        // The fast-start attack is a decaying inverse exponential, so its
+        // steps shrink.
+        for index in 2..100 {
+            assert!(
+                fast[index] - fast[index - 1] < fast[index - 1] - fast[index - 2],
+                "the fast-start attack did not decelerate at {index}"
+            );
+        }
+
+        // The slow-start attack is a rising exponential, so its steps grow.
+        for index in 2..100 {
+            assert!(
+                slow[index] - slow[index - 1] >= slow[index - 1] - slow[index - 2],
+                "the slow-start attack did not accelerate at {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_slow_start_envelope_runs_through_every_stage() {
+        let mut env = Envelope::new();
+        env.init(SRATE, 5.0, 50.0, -30.0, 100.0, 0.0, 0.0, 0.0);
+        env.attack(1.0);
+
+        let mut stage = Stage::Attack;
+        for _ in 0..10_000 {
+            stage = env.process();
+            if stage != Stage::Attack {
+                break;
+            }
+        }
+        assert_eq!(stage, Stage::Decay);
+
+        for _ in 0..100_000 {
+            stage = env.process();
+            if stage != Stage::Decay {
+                break;
+            }
+        }
+        assert_eq!(stage, Stage::Sustain);
+        assert!((env.env - 0.031_622_776_601_683_8).abs() < 1e-3);
+
+        env.release();
+        assert_eq!(env.state, Stage::Release);
+
+        for _ in 0..100_000 {
+            stage = env.process();
+            if stage != Stage::Release {
+                break;
+            }
+        }
+        assert_eq!(stage, Stage::Off);
+        assert_eq!(env.env, 0.0);
+    }
 }
 ```
 
 - [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp envelope`
-Expected: 8 tests pass.
+Expected: 10 tests pass.
 
 - [ ] **Step 4: Commit**
 
@@ -1379,7 +1537,16 @@ impl Comb {
     }
 
     /// Processes one sample and returns the left and right outputs.
+    ///
+    /// If [`Comb::init`] has not been called yet there is no delay line to
+    /// read from. The C++ original is undefined behaviour in that state, so
+    /// rather than panicking on the audio thread this passes the input
+    /// through unchanged on both channels.
     pub fn process(&mut self, input: f64) -> (f64, f64) {
+        if self.buf.is_empty() {
+            return (input, input);
+        }
+
         self.buf[self.pos] = input;
         self.pos = (self.pos + 1) % self.buf.len();
 
@@ -1424,6 +1591,22 @@ mod tests {
     }
 
     #[test]
+    fn processing_before_init_passes_the_input_through_unchanged() {
+        // The C++ original has an empty delay line here and is undefined
+        // behaviour; the Rust port must not panic on the audio thread.
+        let mut comb = Comb::new();
+        assert_eq!(comb.delay_len(), 0);
+
+        let (left, right) = comb.process(0.5);
+        assert_eq!(left, 0.5);
+        assert_eq!(right, 0.5);
+
+        let (left, right) = comb.process(-0.25);
+        assert_eq!(left, -0.25);
+        assert_eq!(right, -0.25);
+    }
+
+    #[test]
     fn the_first_sample_passes_through_unchanged() {
         let mut comb = Comb::new();
         comb.init(48_000.0);
@@ -1458,7 +1641,7 @@ mod tests {
 - [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp comb`
-Expected: 5 tests pass.
+Expected: 6 tests pass.
 
 - [ ] **Step 4: Commit**
 
@@ -1508,7 +1691,7 @@ Create `rust/crates/rippler-dsp/src/limiter.rs`:
 //! ratio, and applies the gain equally to both channels.
 
 /// A stereo brickwall limiter.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Limiter {
     log2db: f64,
     db2log: f64,
@@ -1536,11 +1719,28 @@ impl Limiter {
     const DB2LOG: f64 = 0.115_129_254_649_702_284_200_899_572_734_22;
 
     /// Creates an uninitialised limiter. Call [`Limiter::init`] before use.
+    ///
+    /// This is the same value as [`Limiter::default`]: the two conversion
+    /// constants are filled in, so that `init` computes a usable `capsc`.
     pub fn new() -> Self {
         Self {
             log2db: Self::LOG2DB,
             db2log: Self::DB2LOG,
-            ..Default::default()
+            rundb: 0.0,
+            runave: 0.0,
+            threshv: 0.0,
+            cthresh: 0.0,
+            cthreshv: 0.0,
+            ratio: 0.0,
+            bias: 0.0,
+            makeupv: 0.0,
+            capsc: 0.0,
+            attime: 0.0002,
+            reltime: 0.3,
+            atcoef: 0.0,
+            relcoef: 0.0,
+            rmstime: 0.0,
+            rmscoef: 0.0,
         }
     }
 
@@ -1561,9 +1761,11 @@ impl Limiter {
         self.atcoef = (-1.0 / (self.attime * srate)).exp();
         self.relcoef = (-1.0 / (self.reltime * srate)).exp();
 
-        // NOTE: the original reads `rmstime` before assigning it, so the RMS
-        // window coefficient is always zero and the RMS average tracks the
-        // instantaneous value. Reproduced here so the sound does not change.
+        // NOTE: the original reads `rmstime` before assigning it. On a *first*
+        // `init` the field is still zero, so the coefficient is zero and the
+        // RMS average tracks the instantaneous value. A *second* `init` reuses
+        // the now-set `rmstime`, which gives a non-zero coefficient. The
+        // ordering is reproduced here so the sound does not change.
         self.rmscoef = (-1.0 / (self.rmstime * srate)).exp();
         self.rmstime = rms_win / 1_000_000.0;
 
@@ -1596,6 +1798,17 @@ impl Limiter {
         let grv = (gr * self.db2log).exp();
 
         (spl0 * grv * self.makeupv, spl1 * grv * self.makeupv)
+    }
+}
+
+impl Default for Limiter {
+    /// Same as [`Limiter::new`].
+    ///
+    /// A derived `Default` would leave the conversion constants at zero and
+    /// make `init` compute a `capsc` of zero, so the limiter would do
+    /// nothing. Delegating keeps the two constructors identical.
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1669,13 +1882,58 @@ mod tests {
             assert!(left.is_finite() && right.is_finite());
         }
     }
+
+    #[test]
+    fn the_default_limiter_behaves_like_a_new_one() {
+        let mut from_default = Limiter::default();
+        let mut from_new = Limiter::new();
+
+        from_default.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+        from_new.init(SRATE, 0.0, 70.0, 100.0, 0.0);
+
+        // A limiter built with a derived `Default` would have a `capsc` of
+        // zero and would leave the signal completely alone, so a loud signal
+        // must still be attenuated here.
+        for n in 0..1000 {
+            let input = (n as f64 * 0.01).sin() * 2.0;
+            let (default_left, default_right) = from_default.process(input, -input);
+            let (new_left, new_right) = from_new.process(input, -input);
+
+            assert_eq!(default_left, new_left, "left diverged at {n}");
+            assert_eq!(default_right, new_right, "right diverged at {n}");
+        }
+
+        assert!(from_default.process(2.0, 2.0).0 < 2.0);
+    }
+
+    #[test]
+    fn the_rms_window_has_no_effect_on_the_first_init() {
+        // The original computes `rmscoef` from `rmstime` before assigning it,
+        // so on a first `init` the coefficient is zero and the RMS window has
+        // no effect at all. A refactor that fixes the ordering would change
+        // the sound, so the quirk is pinned here.
+        let mut short_window = Limiter::new();
+        let mut long_window = Limiter::new();
+
+        short_window.init(SRATE, 0.0, 70.0, 1.0, 0.0);
+        long_window.init(SRATE, 0.0, 70.0, 500.0, 0.0);
+
+        for n in 0..5000 {
+            let input = (n as f64 * 0.01).sin() * 2.0;
+            let (short_left, short_right) = short_window.process(input, -input);
+            let (long_left, long_right) = long_window.process(input, -input);
+
+            assert_eq!(short_left, long_left, "left diverged at {n}");
+            assert_eq!(short_right, long_right, "right diverged at {n}");
+        }
+    }
 }
 ```
 
 - [ ] **Step 3: Run the test to verify it passes**
 
 Run: `cd rust && cargo test -p rippler-dsp limiter`
-Expected: 6 tests pass.
+Expected: 8 tests pass.
 
 - [ ] **Step 4: Commit**
 
@@ -1710,17 +1968,29 @@ git add rust
 git commit -m "style: format the Rust workspace"
 ```
 
-- [ ] **Step 6: Verify the JUCE build still works**
+- [ ] **Step 6: Verify the JUCE tree is untouched**
 
-The JUCE tree must be untouched. Run the existing CMake build to confirm:
+The JUCE tree is the reference implementation the remaining plans port from, so
+it has to be intact. This plan only adds files under `rust/`, so the check is
+that nothing outside `rust/` changed:
+
+```bash
+git diff --stat <commit-before-this-plan>..HEAD -- src/ libs/ resources/ CMakeLists.txt .github/
+```
+
+Expected: no output. Every change is inside `rust/`.
+
+If an MSVC toolchain is installed, also run the existing CMake build to confirm
+the plugin still compiles:
 
 ```bash
 cmake -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -S . -B ./build
 cmake --build ./build --config Release
 ```
 
-Expected: the JUCE plugin still compiles. This is the reference implementation the
-remaining plans port from, so it has to keep working.
+JUCE rejects MinGW outright, so this needs the MSVC C++ toolchain. On a machine
+without it, the `git diff` check above is the verification, and the limitation
+should be recorded rather than worked around.
 
 ## Notes for the next plan
 

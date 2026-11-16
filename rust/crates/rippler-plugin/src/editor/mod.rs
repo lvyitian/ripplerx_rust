@@ -13,6 +13,7 @@
 
 pub mod knob;
 pub mod settings;
+pub mod tension;
 pub mod theme;
 
 use nice_plug::util::AtomicF32;

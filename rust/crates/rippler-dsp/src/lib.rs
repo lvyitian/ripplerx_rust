@@ -4,3 +4,4 @@
 //! portable, testable in isolation, and free of allocation on the audio path.
 
 pub mod lut;
+pub mod rng;

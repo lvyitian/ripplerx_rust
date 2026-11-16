@@ -11,16 +11,20 @@
 //! opened. The rest is in [`OpenState`], which only exists while the editor
 //! window is open.
 
+pub mod knob;
 pub mod settings;
 pub mod theme;
 
 use nice_plug::util::AtomicF32;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use egui::{Context, Ui};
-use nice_plug::context::gui::GuiContext;
+use nice_plug::context::gui::{GuiContext, ParamSetter};
 use nice_plug::editor::dpi::LogicalSize;
+use nice_plug_core::params::Params as ParamsTrait;
+use nice_plug_core::params::internals::ParamPtr;
 use nice_plug_egui::baseview::HandlerError;
 use nice_plug_egui::{Frame, NiceEguiApp};
 use rippler_params::params::RipplerParams;
@@ -32,6 +36,151 @@ use crate::editor::theme::Theme;
 ///
 /// The JUCE editor is 650 by 485.
 pub const EDITOR_SIZE: LogicalSize<f32> = LogicalSize::new(650.0, 485.0);
+
+/// The plugin's parameters, by their legacy identifier.
+///
+/// The parameters are looked up once, when the editor opens, and the pointers
+/// stay valid for as long as the parameter set is alive, which it is for as
+/// long as the editor holds on to it.
+///
+/// The identifiers are the legacy ones, so a widget names a parameter in one
+/// place only and the same name is used everywhere else.
+pub(crate) struct Parameters {
+    /// The pointer of every parameter, by its identifier.
+    map: HashMap<String, ParamPtr>,
+}
+
+impl Parameters {
+    /// Looks the parameters of a parameter set up.
+    pub fn new(params: &RipplerParams) -> Self {
+        let map = params
+            .param_map()
+            .into_iter()
+            .map(|(id, pointer, _)| (id, pointer))
+            .collect();
+        Self { map }
+    }
+
+    /// The pointer of a parameter.
+    fn pointer(&self, id: &str) -> Option<ParamPtr> {
+        self.map.get(id).copied()
+    }
+
+    /// The normalised value of a parameter.
+    pub fn normalized(&self, id: &str) -> f32 {
+        let Some(pointer) = self.pointer(id) else {
+            return 0.0;
+        };
+        // SAFETY: the pointers point into the parameter set, which the editor
+        // holds in an `Arc` for as long as the editor lives.
+        unsafe { pointer.modulated_normalized_value() }
+    }
+
+    /// The plain value of a parameter.
+    ///
+    /// A choice parameter holds its index and a boolean holds `0.0` or `1.0`,
+    /// the way the legacy state holds them.
+    pub fn plain(&self, id: &str) -> f32 {
+        let Some(pointer) = self.pointer(id) else {
+            return 0.0;
+        };
+        // SAFETY: see `normalized`.
+        unsafe { pointer.modulated_plain_value() }
+    }
+
+    /// The normalised default value of a parameter.
+    pub fn default_normalized(&self, id: &str) -> f32 {
+        let Some(pointer) = self.pointer(id) else {
+            return 0.0;
+        };
+        // SAFETY: see `normalized`.
+        unsafe { pointer.default_normalized_value() }
+    }
+
+    /// The normalised value of a plain value.
+    pub fn preview_normalized(&self, id: &str, plain: f32) -> f32 {
+        let Some(pointer) = self.pointer(id) else {
+            return 0.0;
+        };
+        // SAFETY: see `normalized`.
+        unsafe { pointer.preview_normalized(plain) }
+    }
+}
+
+/// The plugin's parameters and the setter that writes them.
+///
+/// The setter is the one the plugin's context hands to the editor, so every
+/// change the editor makes is recorded by the host as an automation point.
+pub(crate) struct Params<'a> {
+    /// The parameters.
+    parameters: &'a Parameters,
+    /// The setter.
+    setter: &'a ParamSetter<'a>,
+}
+
+impl<'a> Params<'a> {
+    /// Binds the parameters to a setter.
+    pub fn new(parameters: &'a Parameters, setter: &'a ParamSetter<'a>) -> Self {
+        Self { parameters, setter }
+    }
+
+    /// The normalised value of a parameter.
+    pub fn normalized(&self, id: &str) -> f32 {
+        self.parameters.normalized(id)
+    }
+
+    /// The plain value of a parameter.
+    pub fn plain(&self, id: &str) -> f32 {
+        self.parameters.plain(id)
+    }
+
+    /// The normalised default value of a parameter.
+    pub fn default_normalized(&self, id: &str) -> f32 {
+        self.parameters.default_normalized(id)
+    }
+
+    /// The normalised value of a plain value.
+    pub fn preview_normalized(&self, id: &str, plain: f32) -> f32 {
+        self.parameters.preview_normalized(id, plain)
+    }
+
+    /// Tells the host that a parameter is about to change.
+    pub fn begin(&self, id: &str) {
+        let Some(pointer) = self.parameters.pointer(id) else {
+            return;
+        };
+        // SAFETY: the pointer comes from the plugin's own parameter map, so
+        // the parameter exists.
+        unsafe { self.setter.raw_context.raw_begin_set_parameter(pointer) };
+    }
+
+    /// Tells the host that a parameter has changed.
+    pub fn set_normalized(&self, id: &str, value: f32) {
+        let Some(pointer) = self.parameters.pointer(id) else {
+            return;
+        };
+        // SAFETY: the pointer comes from the plugin's own parameter map, so
+        // the parameter exists. The value is snapped to the parameter's step
+        // size first, the way JUCE's `setValueNotifyingHost` does.
+        unsafe {
+            let plain = pointer.preview_plain(value);
+            let snapped = pointer.preview_normalized(plain);
+            self.setter
+                .raw_context
+                .raw_set_parameter_normalized(pointer, snapped);
+        }
+    }
+
+    /// Tells the host that a parameter has finished changing.
+    pub fn end(&self, id: &str) {
+        let Some(pointer) = self.parameters.pointer(id) else {
+            return;
+        };
+        // SAFETY: the pointer comes from the plugin's own parameter map, so
+        // the parameter exists.
+        unsafe { self.setter.raw_context.raw_end_set_parameter(pointer) };
+    }
+}
 
 /// The state the editor keeps between openings.
 ///

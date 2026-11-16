@@ -5,6 +5,7 @@
 //! runs.
 
 pub mod identity;
+pub mod process;
 
 use nice_plug::prelude::*;
 use rippler_dsp::comb::Comb;
@@ -17,6 +18,8 @@ use rippler_dsp::voice::Voice;
 use rippler_params::params::RipplerParams;
 use std::sync::Arc;
 
+use crate::process::{MIDI_QUEUE_CAPACITY, MidiState};
+
 /// The number of voices the plugin has, `globals::MAX_POLYPHONY`.
 ///
 /// The JUCE build keeps sixteen voices around and uses the first
@@ -28,6 +31,11 @@ pub const MAX_POLYPHONY: usize = 16;
 /// The JUCE build keeps the polyphony in its settings file, and reads eight
 /// when the file does not say otherwise.
 pub const DEFAULT_POLYPHONY: usize = 8;
+
+/// The time the pitch bend takes to glide, in milliseconds.
+///
+/// The C++'s `globals::BEND_GLIDE_MS`.
+const BEND_GLIDE_MS: f64 = 2.0;
 
 /// The plugin.
 pub struct RipplerX {
@@ -51,6 +59,12 @@ pub struct RipplerX {
     srate: f64,
     /// The number of voices in use.
     polyphony: usize,
+    /// The state of the MIDI input.
+    midi: MidiState,
+    /// The range of the noise's mix.
+    noise_mix_range: FloatRange,
+    /// The range of the noise's resonance.
+    noise_res_range: FloatRange,
 }
 
 impl Default for RipplerX {
@@ -66,6 +80,9 @@ impl Default for RipplerX {
             rngs: Vec::new(),
             srate: 44100.0,
             polyphony: DEFAULT_POLYPHONY,
+            midi: MidiState::default(),
+            noise_mix_range: FloatRange::Linear { min: 0.0, max: 1.0 },
+            noise_res_range: FloatRange::Linear { min: 0.0, max: 1.0 },
         }
     }
 }
@@ -114,7 +131,41 @@ impl Plugin for RipplerX {
         buffer_config: &BufferConfig,
         _context: &mut impl ActivateContext<Self>,
     ) -> bool {
-        self.srate = buffer_config.sample_rate as f64;
+        self.prepare(buffer_config.sample_rate as f64);
+
+        true
+    }
+
+    fn process(
+        &mut self,
+        buffer: &mut Buffer,
+        _aux: &mut AuxiliaryBuffers,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        // The events of the block are queued, the way the JUCE build queues
+        // the MIDI messages it is handed.
+        while let Some(event) = context.next_event() {
+            self.queue_event(event);
+        }
+
+        self.process_block(buffer);
+
+        ProcessStatus::Normal
+    }
+
+    fn deactivate(&mut self) {
+        self.voices.clear();
+        self.rngs.clear();
+    }
+}
+
+impl RipplerX {
+    /// Allocates everything that depends on the sample rate.
+    ///
+    /// This is the only place where allocating is allowed, because it is
+    /// called from [`Plugin::activate`].
+    pub(crate) fn prepare(&mut self, srate: f64) {
+        self.srate = srate;
 
         // The voices, the sampler and the lookup tables are allocated here,
         // because this is the only place where allocating is allowed.
@@ -127,25 +178,17 @@ impl Plugin for RipplerX {
         self.comb.init(self.srate);
         self.limiter = Limiter::new(self.srate);
 
-        true
-    }
+        // The ranges of the noise's mix and resonance never change, so they
+        // are read once here.
+        self.noise_mix_range = self.params.noise.noise_mix.range();
+        self.noise_res_range = self.params.noise.noise_res.range();
 
-    fn process(
-        &mut self,
-        buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
-    ) -> ProcessStatus {
-        // The processing loop arrives with the next task.
-        for channel in buffer.as_slice() {
-            channel.fill(0.0);
-        }
+        // The MIDI queue is allocated once, so that the audio thread never
+        // allocates.
+        self.midi.queue.reserve(MIDI_QUEUE_CAPACITY);
+        self.midi.sustain_pedal_notes.reserve(MAX_POLYPHONY);
 
-        ProcessStatus::Normal
-    }
-
-    fn deactivate(&mut self) {
-        self.voices.clear();
-        self.rngs.clear();
+        // The pitch bend glides over two milliseconds.
+        self.midi.bend.total = (BEND_GLIDE_MS * 0.001 * self.srate) as i64;
     }
 }

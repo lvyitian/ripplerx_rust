@@ -14,6 +14,7 @@ pub mod lut;
 pub mod luts;
 pub mod mallet;
 pub mod models;
+pub mod noise;
 pub mod partial;
 pub mod resonator;
 pub mod rng;

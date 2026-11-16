@@ -109,8 +109,14 @@ ratio parameter has changed — on the audio thread, at the top of the block.
 
 The C++ swaps the sampler on the message thread while the audio thread reads it.
 Here the plugin owns the `Sampler` and passes `&Sampler` into the voices, so the
-swap happens on the audio thread when the mallet type changes. That is a rare
-one-off allocation, and it removes the race.
+swap happens on the audio thread when the mallet type changes.
+
+**The swap must not decode.** Decoding a FLAC on the audio thread allocates and
+risks a dropout. Instead, decode the fourteen internal samples in `activate()`,
+keep them in a cache keyed by `MalletType`, and **move** the cached waveform
+into the sampler when the type changes — a move of a `Vec` is a pointer swap, so
+nothing allocates and nothing decodes on the audio thread. The fourteen samples
+total about 105,000 samples, so the cache costs roughly 840 kB.
 
 ### 6. Microtuning is a plugin-level concern
 
@@ -240,7 +246,8 @@ Implement `Default` and the `Plugin` trait, with:
   identifier `com.tilr.ripplerx`, and the version from `CMakeLists.txt`.
 - `AUDIO_IO_LAYOUTS` with a main input of two channels, a main output of two
   channels, and no auxiliary ports.
-- `MIDI_INPUT: MidiConfig::Basic`.
+- `MIDI_INPUT: MidiConfig::MidiCCs`. The plugin needs the sustain pedal and the
+  pitch wheel, which `Basic` does not carry.
 - `SAMPLE_ACCURATE_AUTOMATION: true`.
 - `params()` returning the `Arc<RipplerParams>`.
 - `activate()` allocating the voices and the sampler, and the `Luts`.
@@ -277,11 +284,12 @@ The JUCE build reads every parameter once per block into locals and then works
 from those. Do the same: a `BlockParams` struct holding plain `f64` and `bool`
 fields, built from the parameter struct at the top of each block.
 
-The parameters that the JUCE build reads per *sample* rather than per block are
-the ones that scale with velocity: `mallet_mix`, `mallet_res`, `vel_mallet_mix`,
-`vel_mallet_res`, `noise_mix`, `noise_res`, `vel_noise_mix`, `vel_noise_res`,
-and the noise oscillator's amount. Read those from the parameter struct inside
-the voice loop, exactly as the C++ does.
+The parameters that scale with velocity — `mallet_mix`, `mallet_res`,
+`vel_mallet_mix`, `vel_mallet_res`, `noise_mix`, `noise_res`, `vel_noise_mix`,
+`vel_noise_res` and the noise oscillator's amount — are read **once per block**
+into the snapshot, exactly as the C++ does. Reading them per sample would cost
+seven atomic loads per sample for no behavioural difference, because nice-plug
+splits a block at every automation change.
 
 - [ ] **Step 2: Write the MIDI queue**
 
@@ -291,7 +299,10 @@ gives note events with their own sample offsets, so keep the same queue.
 
 The events to handle, from `src/PluginProcessor.cpp`:
 
-- note on and note off, with velocity.
+- note on and note off, with velocity. **A note-on with a velocity of zero is a
+  note-off**, because JUCE's `MidiMessage::isNoteOff()` returns true for it and
+  nice-plug does not normalise it. Without this, a controller that signals
+  note-off as note-on-velocity-zero leaves a stuck note.
 - sustain pedal on and off. The C++ holds the released notes while the pedal is
   down and releases them when it comes up, and it removes a note from that list
   when the note is pressed again — the original's fix for a note pressed twice
@@ -566,6 +577,9 @@ Expected: no output.
   identifier without hand-writing setters.
 - The plugin's `type Editor` is currently `()`. The editor plan replaces it with
   an egui editor.
+- `params::default_ratio` is public, because the editor mirrors the model's
+  default ratio into the host parameter — the plugin applies it internally and
+  cannot write a host parameter from the audio thread.
 - The plugin does not yet write its own state beyond what nice-plug's `Params`
   provides. The `currentProgram` and the user sample are extras the JUCE build
   kept in its state; if they are wanted, they belong in the `Params` struct as

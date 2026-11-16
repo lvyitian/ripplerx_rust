@@ -10,6 +10,29 @@
 //! it is owned by the plugin, which hands it to the editor when the editor is
 //! opened. The rest is in [`OpenState`], which only exists while the editor
 //! window is open.
+//!
+//! # The decisions of this port
+//!
+//! - **The theme, the scale and the polyphony** are not plugin parameters in
+//!   the JUCE build either: they live in a settings file. They live in one
+//!   here as well — a small JSON file in the user's configuration directory,
+//!   written by [`settings`]. The polyphony is shared with the audio thread
+//!   through an atomic, because the audio thread may not lock a mutex.
+//! - **The images** — the logo, the sun and the moon and the buttons of the
+//!   resonators — are the PNG files of the `resources` folder, embedded in
+//!   the plugin with `include_bytes!` and decoded with the `image` crate when
+//!   the editor opens. The font of the JUCE build is embedded the same way.
+//! - **The keyboard** of the JUCE editor is not there. nice-plug's editor
+//!   API has no way of sending a note to the host, so a keyboard that could
+//!   not play would only be in the way. The host's own keyboard is used
+//!   instead.
+//! - **The file dialogs** are the ones of `rfd`, which are the native
+//!   dialogs of the system. The patch is written as a `.ripx` file, which is
+//!   the JSON document of `rippler_params::patch`, and the old XML patches
+//!   are read through `rippler_params::legacy`.
+//! - **The factory presets** are the legacy XML files of the `resources`
+//!   folder, embedded in the plugin and converted to patches when they are
+//!   loaded, so that there is only one copy of every preset.
 
 pub mod knob;
 pub mod menus;

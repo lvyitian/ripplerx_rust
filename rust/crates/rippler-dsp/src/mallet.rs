@@ -68,6 +68,49 @@ pub enum MalletType {
     Sample14 = 25,
 }
 
+impl MalletType {
+    /// Every mallet type, in the order of the plugin's choice.
+    ///
+    /// The discriminants are the indices the plugin stores, so the index of
+    /// a variant in this list is the value it was saved with.
+    pub const ALL: [MalletType; 26] = [
+        MalletType::Impulse,
+        MalletType::Reserved1,
+        MalletType::Reserved2,
+        MalletType::Reserved3,
+        MalletType::Reserved4,
+        MalletType::Reserved5,
+        MalletType::Reserved6,
+        MalletType::Reserved7,
+        MalletType::Reserved8,
+        MalletType::Reserved9,
+        MalletType::Reserved10,
+        MalletType::UserFile,
+        MalletType::Sample1,
+        MalletType::Sample2,
+        MalletType::Sample3,
+        MalletType::Sample4,
+        MalletType::Sample5,
+        MalletType::Sample6,
+        MalletType::Sample7,
+        MalletType::Sample8,
+        MalletType::Sample9,
+        MalletType::Sample10,
+        MalletType::Sample11,
+        MalletType::Sample12,
+        MalletType::Sample13,
+        MalletType::Sample14,
+    ];
+
+    /// The mallet type the plugin's `mallet_type` choice index stands for.
+    ///
+    /// The choice has twenty six entries, so an index outside zero to
+    /// twenty five stands for nothing and gives `None`.
+    pub fn from_index(index: u8) -> Option<MalletType> {
+        MalletType::ALL.get(index as usize).copied()
+    }
+}
+
 /// The mallet that excites a resonator.
 ///
 /// Port of `src/dsp/Mallet.{h,cpp}`.
@@ -274,6 +317,18 @@ mod tests {
         assert_eq!(MalletType::Sample12 as u8, 23);
         assert_eq!(MalletType::Sample13 as u8, 24);
         assert_eq!(MalletType::Sample14 as u8, 25);
+    }
+
+    #[test]
+    fn every_mallet_type_round_trips_through_its_index() {
+        for (index, variant) in MalletType::ALL.iter().enumerate() {
+            assert_eq!(*variant as u8, index as u8);
+            assert_eq!(MalletType::from_index(index as u8), Some(*variant));
+        }
+
+        // An index outside the choice stands for nothing.
+        assert_eq!(MalletType::from_index(26), None);
+        assert_eq!(MalletType::from_index(255), None);
     }
 
     #[test]

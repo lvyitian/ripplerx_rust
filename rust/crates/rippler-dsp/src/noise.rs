@@ -5,6 +5,7 @@
 use crate::envelope::{Envelope, Stage};
 use crate::filter::Filter;
 use crate::rng::Rng;
+use crate::utils::{clamp_cpp, clamp_cpp_inverted};
 
 /// The parameters that configure the noise generator.
 #[derive(Clone, Copy, Debug)]
@@ -41,22 +42,6 @@ pub struct NoiseSettings {
     pub vel_sus: f64,
     /// How much velocity shifts the release.
     pub vel_rel: f64,
-}
-
-/// Clamps `x` into `[lo, hi]` the way the C++'s `fmax(lo, fmin(hi, x))` does.
-///
-/// The C++'s `fmin` and `fmax` return the non-NaN operand, so a NaN is
-/// clamped to the high bound here.
-fn clamp_cpp(lo: f64, hi: f64, x: f64) -> f64 {
-    lo.max(hi.min(x))
-}
-
-/// Clamps `x` into `[lo, hi]` the way the C++'s `fmin(hi, fmax(lo, x))` does.
-///
-/// The C++ uses this nesting for the resonance and the envelope's times, so a
-/// NaN is clamped to the low bound here.
-fn clamp_cpp_inverted(lo: f64, hi: f64, x: f64) -> f64 {
-    hi.min(lo.max(x))
 }
 
 /// A noise generator with a filter and an envelope.
@@ -172,7 +157,9 @@ impl Noise {
 
     /// Recomputes the filter for the current velocity.
     fn init_filter(&mut self) {
-        let f = clamp_cpp(
+        // The C++ clamps the frequency and the resonance with
+        // `fmin(hi, fmax(lo, x))`.
+        let f = clamp_cpp_inverted(
             20.0,
             20000.0,
             (self.freq.ln() + self.vel * self.vel_freq * (20000.0f64.ln() - 20.0f64.ln())).exp(),
@@ -211,6 +198,8 @@ impl Noise {
 
     /// Recomputes the envelope for the current velocity.
     fn init_envelope(&mut self) {
+        // The C++ clamps the envelope's times and its sustain with
+        // `fmax(lo, fmin(hi, x))`.
         let _att = clamp_cpp(
             1.0,
             20000.0,
@@ -221,7 +210,7 @@ impl Noise {
             20000.0,
             (self.dec.ln() + self.vel * self.vel_dec * (20000.0f64.ln() - 1.0f64.ln())).exp(),
         );
-        let _sus = clamp_cpp_inverted(0.0, 1.0, self.sus + self.vel * self.vel_sus);
+        let _sus = clamp_cpp(0.0, 1.0, self.sus + self.vel * self.vel_sus);
         let _rel = clamp_cpp(
             1.0,
             20000.0,
@@ -497,5 +486,105 @@ mod tests {
                 "the oscillator path was {osc_sample} against {noise_sample}"
             );
         }
+    }
+
+    /// Builds a noise generator with the given settings.
+    fn noise_with(settings: NoiseSettings) -> Noise {
+        let mut noise = Noise::new();
+        noise.init(SRATE, &settings);
+        noise.attack(0.5);
+        noise
+    }
+
+    #[test]
+    fn a_nan_filter_frequency_clamps_to_the_low_bound() {
+        // The C++ clamps the filter frequency with `fmin(hi, fmax(lo, x))`,
+        // and its `fmax` returns the non-NaN operand, so a NaN ends up at
+        // the low bound of twenty hertz.
+        let mut nan_settings = settings();
+        nan_settings.filter_mode = 0;
+        nan_settings.freq = f64::NAN;
+
+        let mut low_settings = settings();
+        low_settings.filter_mode = 0;
+        low_settings.freq = 20.0;
+
+        let mut nan_noise = noise_with(nan_settings);
+        let mut low_noise = noise_with(low_settings);
+
+        // A low-pass filter is active while its frequency is below twenty
+        // kilohertz, so the two noises behave the same way.
+        assert!(nan_noise.filter_active);
+        assert!(low_noise.filter_active);
+
+        let mut rng_a = Rng::new(11);
+        let mut rng_b = Rng::new(11);
+        for _ in 0..1000 {
+            assert_eq!(nan_noise.process(&mut rng_a), low_noise.process(&mut rng_b));
+        }
+    }
+
+    #[test]
+    fn a_nan_resonance_clamps_to_the_low_bound() {
+        // The C++ clamps the resonance with `fmin(hi, fmax(lo, x))` as well,
+        // so a NaN ends up at the low bound of 0.707.
+        let mut nan_settings = settings();
+        nan_settings.filter_mode = 0;
+        nan_settings.freq = 1000.0;
+        nan_settings.q = f64::NAN;
+
+        let mut low_settings = nan_settings;
+        low_settings.q = 0.707;
+
+        let mut high_settings = nan_settings;
+        high_settings.q = 4.0;
+
+        let mut nan_noise = noise_with(nan_settings);
+        let mut low_noise = noise_with(low_settings);
+        let mut high_noise = noise_with(high_settings);
+
+        let mut rng_a = Rng::new(13);
+        let mut rng_b = Rng::new(13);
+        let mut rng_c = Rng::new(13);
+        let mut differs = false;
+
+        for _ in 0..1000 {
+            let nan_sample = nan_noise.process(&mut rng_a);
+            assert_eq!(nan_sample, low_noise.process(&mut rng_b));
+            if nan_sample != high_noise.process(&mut rng_c) {
+                differs = true;
+            }
+        }
+
+        assert!(differs, "the resonance made no difference");
+    }
+
+    #[test]
+    fn a_nan_envelope_time_clamps_to_the_high_bound() {
+        // The C++ clamps the envelope's times with `fmax(lo, fmin(hi, x))`,
+        // and its `fmin` returns the non-NaN operand, so a NaN ends up at the
+        // high bound of twenty thousand milliseconds.
+        let mut nan_settings = settings();
+        nan_settings.attack = f64::NAN;
+        nan_settings.decay = f64::NAN;
+        nan_settings.release = f64::NAN;
+
+        let noise = noise_with(nan_settings);
+
+        assert_eq!(noise.env.att, 20000.0 * 0.001 * SRATE);
+        assert_eq!(noise.env.dec, 20000.0 * 0.001 * SRATE);
+        assert_eq!(noise.env.rel, 20000.0 * 0.001 * SRATE);
+    }
+
+    #[test]
+    fn a_nan_sustain_clamps_to_the_high_bound() {
+        // The C++ clamps the sustain with `fmax(lo, fmin(hi, x))` too, so a
+        // NaN ends up at the high bound of one, which is zero decibels.
+        let mut nan_settings = settings();
+        nan_settings.sustain = f64::NAN;
+
+        let noise = noise_with(nan_settings);
+
+        assert_eq!(noise.env.sus, 1.0);
     }
 }

@@ -8,6 +8,29 @@
 /// so they are associated functions on an otherwise empty struct.
 pub struct Utils;
 
+/// Clamps `x` into `[lo, hi]` the way the C++'s `fmax(lo, fmin(hi, x))` does.
+///
+/// The C++'s `fmin` and `fmax` return the non-NaN operand, so a NaN is
+/// clamped to the high bound here. Rust's `clamp` propagates the NaN instead,
+/// which is not what the C++ does.
+///
+/// This is the nesting the C++ uses for the envelope's attack, decay, sustain
+/// and release, and for the partial's inharmonicity, decay and amplitude.
+pub fn clamp_cpp(lo: f64, hi: f64, x: f64) -> f64 {
+    lo.max(hi.min(x))
+}
+
+/// Clamps `x` into `[lo, hi]` the way the C++'s `fmin(hi, fmax(lo, x))` does.
+///
+/// The C++'s `fmin` and `fmax` return the non-NaN operand, so a NaN is
+/// clamped to the low bound here.
+///
+/// This is the nesting the C++ uses for the noise's filter frequency and
+/// resonance, and for the partial's damping and tone.
+pub fn clamp_cpp_inverted(lo: f64, hi: f64, x: f64) -> f64 {
+    hi.min(lo.max(x))
+}
+
 impl Utils {
     /// `log(20000 / 20)`, the span of the normalised frequency range.
     pub const LOG_MAX_OVER_MIN_FREQ: f64 = 6.907_755_278_982_137;
@@ -141,5 +164,34 @@ mod tests {
                 "{norm} round tripped to {round_trip}"
             );
         }
+    }
+
+    #[test]
+    fn the_cpp_clamp_clamps_a_nan_to_the_high_bound() {
+        // The C++'s `fmax(lo, fmin(hi, x))` returns the non-NaN operand, so
+        // a NaN ends up at the high bound.
+        assert_eq!(clamp_cpp(0.0, 1.0, f64::NAN), 1.0);
+        assert_eq!(clamp_cpp(1.0, 20000.0, f64::NAN), 20000.0);
+    }
+
+    #[test]
+    fn the_inverted_cpp_clamp_clamps_a_nan_to_the_low_bound() {
+        // The C++'s `fmin(hi, fmax(lo, x))` returns the non-NaN operand too,
+        // but the `fmax` is the inner call, so a NaN ends up at the low bound.
+        assert_eq!(clamp_cpp_inverted(0.0, 1.0, f64::NAN), 0.0);
+        assert_eq!(clamp_cpp_inverted(20.0, 20000.0, f64::NAN), 20.0);
+    }
+
+    #[test]
+    fn the_cpp_clamps_agree_with_the_rust_clamp() {
+        for value in [-2.0, -0.5, 0.0, 0.25, 0.5, 1.0, 2.0] {
+            assert_eq!(clamp_cpp(0.0, 1.0, value), value.clamp(0.0, 1.0));
+            assert_eq!(clamp_cpp_inverted(0.0, 1.0, value), value.clamp(0.0, 1.0));
+        }
+
+        assert_eq!(clamp_cpp(0.0, 1.0, -1.0), 0.0);
+        assert_eq!(clamp_cpp(0.0, 1.0, 2.0), 1.0);
+        assert_eq!(clamp_cpp_inverted(0.0, 1.0, -1.0), 0.0);
+        assert_eq!(clamp_cpp_inverted(0.0, 1.0, 2.0), 1.0);
     }
 }

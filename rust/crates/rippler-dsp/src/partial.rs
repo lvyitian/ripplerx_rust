@@ -3,23 +3,7 @@
 //! Port of `src/dsp/Partial.{h,cpp}`.
 
 use crate::luts::Luts;
-
-/// Clamps `x` into `[lo, hi]` the way the C++'s `fmax(lo, fmin(hi, x))` does.
-///
-/// The C++'s `fmin` and `fmax` return the non-NaN operand, so a NaN is
-/// clamped to the high bound here. Rust's `clamp` propagates the NaN instead,
-/// which is not what the C++ does.
-fn clamp_cpp(lo: f64, hi: f64, x: f64) -> f64 {
-    lo.max(hi.min(x))
-}
-
-/// Clamps `x` into `[lo, hi]` the way the C++'s `fmin(hi, fmax(lo, x))` does.
-///
-/// The C++ uses this nesting for the damping and the tone, where the `fmax`
-/// is the inner call, so a NaN is clamped to the low bound here.
-fn clamp_cpp_inverted(lo: f64, hi: f64, x: f64) -> f64 {
-    hi.min(lo.max(x))
-}
+use crate::utils::{clamp_cpp, clamp_cpp_inverted};
 
 /// A single mode of a resonator.
 ///

@@ -7,12 +7,20 @@
 //! `symphonia` instead, and keeps the C++'s order of operations exactly:
 //! decode, mix down to mono, truncate to three seconds, and only then
 //! normalise, so the peak is measured over the truncated waveform.
+//!
+//! # The one difference from the JUCE build
+//!
+//! `symphonia` scales a FLAC sample into `f64` by a factor of about two to
+//! the minus thirty first relative to JUCE's own conversion, so the decoded
+//! waveform is not bit for bit the JUCE one. It makes no difference in the
+//! end, because the waveform is peak normalised straight afterwards, but it
+//! does mean the sampler cannot be verified against the JUCE build the way
+//! the rest of the crate can.
 
 use std::path::Path;
 
 use symphonia::core::audio::{AudioBuffer, Signal};
 use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::errors::Error;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -72,45 +80,140 @@ fn internal_sample_bytes(variant: MalletType) -> Option<&'static [u8]> {
     }
 }
 
-/// Decodes a base64 string into bytes.
+/// The alphabet JUCE uses for its base64 encoding.
 ///
-/// This follows JUCE's decoder: every character outside the base64 alphabet
-/// is skipped, and the padding ends the stream.
-fn decode_base64(text: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(text.len() / 4 * 3);
-    let mut accumulator: u32 = 0;
-    let mut bits: u32 = 0;
+/// This is `juce::MemoryBlock`'s own table, which is not the standard base64
+/// alphabet: the first character is a dot and there is no forward slash.
+const JUCE_BASE64_ALPHABET: &[u8; 64] =
+    b".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+";
 
-    for character in text.bytes() {
-        if character == b'=' {
-            break;
-        }
+/// JUCE's base64 decoding table.
+///
+/// The table is indexed by the character's code minus 43, so it covers the
+/// characters from `+` to `z`. The characters that are not in the encoding
+/// alphabet decode as zero, exactly as they do in JUCE.
+const JUCE_BASE64_DECODING_TABLE: [u8; 80] = [
+    63, 0, 0, 0, 0, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6,
+    7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 0, 0, 0, 0, 0, 0,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+    51, 52,
+];
 
-        let Some(value) = base64_value(character) else {
+/// The largest number of bytes a single blob may decode into.
+///
+/// The length comes out of the blob itself, so a malformed one could ask for
+/// an absurd allocation. Nothing legitimate comes close to this.
+const MAX_DECODED_BYTES: usize = 1 << 28;
+
+/// Decodes a blob in JUCE's base64 encoding into bytes.
+///
+/// This is `juce::MemoryBlock::fromBase64Encoding`. The blob is the number
+/// of bytes it holds, a dot, and then the payload, and the payload's bits are
+/// packed least significant bit first. The number before the dot is the
+/// length of the decoded block, so it is what decides how many bytes come
+/// back, and a blob without a dot decodes into nothing at all.
+pub fn decode_juce_base64(text: &str) -> Vec<u8> {
+    let Some(dot) = text.find('.') else {
+        return Vec::new();
+    };
+
+    let length = parse_juce_length(&text[..dot]);
+    if length > MAX_DECODED_BYTES {
+        return Vec::new();
+    }
+
+    let mut bytes = vec![0u8; length];
+    let mut position = 0usize;
+
+    for character in text[dot + 1..].bytes() {
+        // JUCE only looks at the characters its decoding table covers, and
+        // skips the rest without counting them.
+        let index = i32::from(character) - 43;
+        if index < 0 || index >= JUCE_BASE64_DECODING_TABLE.len() as i32 {
             continue;
-        };
-
-        accumulator = (accumulator << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            bytes.push(((accumulator >> bits) & 0xff) as u8);
         }
+
+        set_bit_range(
+            &mut bytes,
+            position,
+            JUCE_BASE64_DECODING_TABLE[index as usize],
+        );
+        position += 6;
     }
 
     bytes
 }
 
-/// The six bit value of a base64 character, or `None` if it is not in the
-/// alphabet.
-fn base64_value(character: u8) -> Option<u8> {
-    match character {
-        b'A'..=b'Z' => Some(character - b'A'),
-        b'a'..=b'z' => Some(character - b'a' + 26),
-        b'0'..=b'9' => Some(character - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
+/// Encodes a block of bytes in JUCE's base64 encoding.
+///
+/// This is `juce::MemoryBlock::toBase64Encoding`, which writes the number of
+/// bytes, a dot, and then the payload. The plugin uses it to keep a user's
+/// sample in its session state.
+pub fn encode_juce_base64(bytes: &[u8]) -> String {
+    let mut encoded = format!("{}.", bytes.len());
+
+    let character_count = (bytes.len() << 3).div_ceil(6);
+    for index in 0..character_count {
+        encoded.push(JUCE_BASE64_ALPHABET[get_bit_range(bytes, index * 6)] as char);
+    }
+
+    encoded
+}
+
+/// Reads the number of bytes out of the front of a blob.
+///
+/// This is `juce::String::getIntValue`, which takes the leading digits and
+/// ignores everything else.
+fn parse_juce_length(text: &str) -> usize {
+    let digits: String = text
+        .trim()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+
+    digits.parse().unwrap_or(0)
+}
+
+/// Reads six bits out of a block, starting at the given bit.
+///
+/// This is `juce::MemoryBlock::getBitRange`. The bits are packed least
+/// significant bit first, and the bits past the end of the block are zero.
+fn get_bit_range(bytes: &[u8], start: usize) -> usize {
+    let mut result = 0usize;
+
+    for bit in 0..6 {
+        let position = start + bit;
+        let index = position / 8;
+        if index >= bytes.len() {
+            break;
+        }
+
+        let value = ((bytes[index] >> (position % 8)) & 1) as usize;
+        result |= value << bit;
+    }
+
+    result
+}
+
+/// Writes six bits into a block, starting at the given bit.
+///
+/// This is `juce::MemoryBlock::setBitRange`. The bits are packed least
+/// significant bit first, and the bits past the end of the block are
+/// dropped.
+fn set_bit_range(bytes: &mut [u8], start: usize, value: u8) {
+    for bit in 0..6 {
+        let position = start + bit;
+        let index = position / 8;
+        if index >= bytes.len() {
+            break;
+        }
+
+        let mask = 1u8 << (position % 8);
+        if value & (1 << bit) != 0 {
+            bytes[index] |= mask;
+        } else {
+            bytes[index] &= !mask;
+        }
     }
 }
 
@@ -149,14 +252,18 @@ impl Sampler {
     /// The C++ clears the waveform first, so a second load replaces the first,
     /// and it neither sets the sample rate nor normalises the samples. All
     /// three are reproduced here, because the session format depends on them.
+    ///
+    /// The blob is in JUCE's base64 encoding, and the doubles in it are the
+    /// native ones the C++ wrote with `MemoryOutputStream::writeDouble`, so
+    /// a trailing partial double is dropped.
     pub fn load_encoded(&mut self, encoded: &str) {
         self.waveform.clear();
 
-        let bytes = decode_base64(encoded);
+        let bytes = decode_juce_base64(encoded);
         for chunk in bytes.as_chunks::<8>().0 {
             let mut buffer = [0u8; 8];
             buffer.copy_from_slice(chunk);
-            self.waveform.push(f64::from_le_bytes(buffer));
+            self.waveform.push(f64::from_ne_bytes(buffer));
         }
 
         self.is_user_file = true;
@@ -178,18 +285,26 @@ impl Sampler {
 
     /// Loads a user file, falling back to the first bundled sample when the
     /// file cannot be read.
+    ///
+    /// The C++ sets the user file flag after the load, whatever the load did,
+    /// so a file that exists but cannot be decoded is still a user file. A
+    /// file that is not there at all returns before the flag is set, so it
+    /// is not one.
     pub fn load_sample(&mut self, path: &Path) {
         if !path.is_file() {
             self.load_internal_sample(MalletType::Sample1);
             return;
         }
 
-        let Ok(bytes) = std::fs::read(path) else {
-            self.load_internal_sample(MalletType::Sample1);
-            return;
-        };
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                self.load_bytes(&bytes);
+            }
+            Err(_) => {
+                self.load_internal_sample(MalletType::Sample1);
+            }
+        }
 
-        self.load_bytes(&bytes);
         self.is_user_file = true;
     }
 
@@ -242,20 +357,23 @@ impl Sampler {
     /// Reads the waveform at a position, interpolating linearly.
     ///
     /// The position is truncated towards zero and the read wraps around at the
-    /// end of the waveform.
+    /// ends of the waveform. The C++ indexes the waveform directly, so a
+    /// position outside it is undefined there; wrapping it is the same thing
+    /// the cubic read does, and it keeps a stray position from taking the
+    /// audio thread down with it.
     pub fn wave_lerp(&self, pos: f64) -> f64 {
         if self.waveform.is_empty() {
             return 0.0;
         }
 
+        let length = self.waveform.len() as i64;
         let i = pos as i64;
         let frac = pos - i as f64;
-        let mut j = i + 1;
-        if j >= self.waveform.len() as i64 {
-            j = 0;
-        }
 
-        (1.0 - frac) * self.waveform[i as usize] + frac * self.waveform[j as usize]
+        let index = i.rem_euclid(length) as usize;
+        let next = (i + 1).rem_euclid(length) as usize;
+
+        (1.0 - frac) * self.waveform[index] + frac * self.waveform[next]
     }
 
     /// Reads the waveform at a position, interpolating with a Catmull-Rom
@@ -364,12 +482,13 @@ fn decode_audio(bytes: &[u8]) -> Option<DecodedAudio> {
             continue;
         }
 
+        // The C++ wraps the whole read in a try block and falls back to the
+        // first bundled sample if anything goes wrong, including a failure
+        // part way through the samples, so a broken packet ends the decode
+        // rather than being skipped.
         let decoded = match decoder.decode(&packet) {
             Ok(decoded) => decoded,
-            // A packet that does not decode is skipped, as the reference
-            // player does.
-            Err(Error::DecodeError(_)) => continue,
-            Err(_) => break,
+            Err(_) => return None,
         };
 
         let channel_count = decoded.spec().channels.count();
@@ -423,39 +542,14 @@ mod tests {
         (MalletType::Sample14, 41686, 1.0),
     ];
 
-    /// Encodes a list of doubles as base64, the way the plugin's session
-    /// state does.
-    fn encode_base64(values: &[f64]) -> String {
+    /// Encodes a list of doubles the way the plugin's session state does.
+    fn encode_doubles(values: &[f64]) -> String {
         let mut bytes = Vec::with_capacity(values.len() * 8);
         for value in values {
-            bytes.extend_from_slice(&value.to_le_bytes());
+            bytes.extend_from_slice(&value.to_ne_bytes());
         }
 
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-        let mut encoded = String::new();
-        for chunk in bytes.chunks(3) {
-            let b0 = chunk[0] as u32;
-            let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-            let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-            let triple = (b0 << 16) | (b1 << 8) | b2;
-
-            encoded.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
-            encoded.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
-            if chunk.len() > 1 {
-                encoded.push(ALPHABET[(triple >> 6) as usize & 0x3f] as char);
-            } else {
-                encoded.push('=');
-            }
-            if chunk.len() > 2 {
-                encoded.push(ALPHABET[triple as usize & 0x3f] as char);
-            } else {
-                encoded.push('=');
-            }
-        }
-
-        encoded
+        encode_juce_base64(&bytes)
     }
 
     #[test]
@@ -489,7 +583,7 @@ mod tests {
     fn loading_an_encoded_waveform_reads_the_doubles() {
         let values = [0.5f64, -0.25, 1.0, 0.0, 1234.5678];
         let mut sampler = Sampler::new();
-        sampler.load_encoded(&encode_base64(&values));
+        sampler.load_encoded(&encode_doubles(&values));
 
         assert_eq!(sampler.waveform, values.to_vec());
         assert!(sampler.is_user_file);
@@ -499,18 +593,124 @@ mod tests {
     }
 
     #[test]
+    fn a_juce_blob_round_trips_the_doubles_exactly() {
+        let values = [
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            1.0e-300,
+            1.0e300,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            std::f64::consts::PI,
+            std::f64::consts::E,
+        ];
+
+        let mut sampler = Sampler::new();
+        sampler.load_encoded(&encode_doubles(&values));
+
+        assert_eq!(sampler.waveform, values.to_vec());
+    }
+
+    #[test]
+    fn a_hand_made_juce_blob_decodes_to_its_doubles() {
+        // These blobs are worked out from JUCE's format by hand, rather than
+        // with this module's encoder, so the test does not only check the
+        // encoder against the decoder.
+        //
+        // The bytes of the double 1.0 are `00 00 00 00 00 00 f0 3f`, and
+        // JUCE packs the bits least significant bit first, so the first
+        // eight six bit groups are zero, which the alphabet writes as a dot.
+        // The ninth group takes the top two bits of the seventh byte, the
+        // tenth takes the low four bits of the eighth byte and the top two
+        // bits of the seventh, and the eleventh takes what is left.
+        let mut sampler = Sampler::new();
+        sampler.load_encoded("8.........v+C");
+
+        assert_eq!(sampler.waveform, vec![1.0]);
+        assert!(sampler.is_user_file);
+
+        // Two doubles are sixteen bytes, and the same reasoning gives the
+        // blob below.
+        let mut sampler = Sampler::new();
+        sampler.load_encoded("16.........v+C..........C");
+
+        assert_eq!(sampler.waveform, vec![1.0, -2.0]);
+
+        // Three doubles are twenty four bytes.
+        let mut sampler = Sampler::new();
+        sampler.load_encoded("24.........f+C........9+B.........P");
+
+        assert_eq!(sampler.waveform, vec![0.5, -1.5, 2.0]);
+    }
+
+    #[test]
+    fn a_hand_made_juce_blob_decodes_to_its_bytes() {
+        // The bytes `01 02 03` are four six bit groups: one, eight, forty
+        // eight and zero, which the alphabet writes as `A`, `H`, `v` and a
+        // dot.
+        assert_eq!(
+            decode_juce_base64("3.AHv."),
+            vec![1u8, 2, 3],
+            "the bytes did not come back"
+        );
+    }
+
+    #[test]
+    fn the_juce_blob_format_is_not_standard_base64() {
+        // A standard base64 blob has no length prefix and no dot, so it
+        // decodes into nothing at all.
+        assert!(decode_juce_base64("AAAAAAAAAAAAAAA=").is_empty());
+
+        // The alphabet starts with a dot and has no forward slash, and the
+        // bits are packed least significant bit first.
+        let encoded = encode_juce_base64(&[0x01, 0x02, 0x03]);
+        assert_eq!(encoded, "3.AHv.");
+        assert!(!encoded.contains('/'));
+    }
+
+    #[test]
+    fn characters_outside_the_decoding_table_are_skipped() {
+        // A star and a space are outside JUCE's decoding table, so they are
+        // skipped without counting towards the payload.
+        let expected = decode_juce_base64("3.AHv.");
+        assert_eq!(decode_juce_base64("3.A*H v."), expected);
+    }
+
+    #[test]
+    fn a_blob_without_a_dot_decodes_to_nothing() {
+        let mut sampler = Sampler::new();
+        sampler.load_encoded("no dot here");
+
+        assert!(sampler.waveform.is_empty());
+        assert!(sampler.is_user_file);
+    }
+
+    #[test]
     fn loading_an_encoded_waveform_ignores_a_partial_double() {
-        // Seven bytes are not a double, so they are dropped.
+        // Fifteen bytes are one double and seven bytes over, and the C++
+        // only reads the whole doubles.
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&1.0f64.to_le_bytes());
+        bytes.extend_from_slice(&1.0f64.to_ne_bytes());
         bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7]);
 
         let mut sampler = Sampler::new();
-        sampler.load_encoded(&encode_base64(&[1.0]));
+        sampler.load_encoded(&encode_juce_base64(&bytes));
 
         assert_eq!(sampler.waveform.len(), 1);
         assert_eq!(sampler.waveform[0], 1.0);
         assert_eq!(bytes.len(), 15);
+    }
+
+    #[test]
+    fn loading_an_encoded_waveform_replaces_the_one_before_it() {
+        let mut sampler = Sampler::new();
+        sampler.load_encoded(&encode_doubles(&[1.0, 2.0, 3.0]));
+        sampler.load_encoded(&encode_doubles(&[4.0]));
+
+        assert_eq!(sampler.waveform, vec![4.0]);
     }
 
     #[test]
@@ -592,6 +792,28 @@ mod tests {
     }
 
     #[test]
+    fn wave_lerp_wraps_a_position_outside_the_waveform() {
+        let mut sampler = Sampler::new();
+        sampler.waveform = vec![0.0, 1.0, 2.0, 3.0];
+
+        // A negative position wraps around to the end of the waveform. The
+        // C++ indexes the waveform directly there, so the read is undefined,
+        // but it must not take the audio thread down with it.
+        let negative = sampler.wave_lerp(-1.5);
+        assert_eq!(negative, 1.5 * 3.0 - 0.5 * 0.0);
+
+        // A position past the end wraps around to the start.
+        let past_the_end = sampler.wave_lerp(4.5);
+        assert_eq!(past_the_end, 1.5 * 0.0 + 0.5 * 1.0);
+
+        // A long way past the end wraps around just the same.
+        assert_eq!(sampler.wave_lerp(100.25), 0.75 * 0.0 + 0.25 * 1.0);
+
+        // A position just below zero stays inside.
+        assert_eq!(sampler.wave_lerp(-0.5), 1.5 * 0.0 - 0.5 * 1.0);
+    }
+
+    #[test]
     fn wave_cubic_matches_the_catmull_rom_formula() {
         let mut sampler = Sampler::new();
         sampler.waveform = vec![0.0, 1.0, 2.0, 3.0];
@@ -636,5 +858,24 @@ mod tests {
         let mut reference = Sampler::new();
         reference.load_internal_sample(MalletType::Sample1);
         assert_eq!(sampler.waveform, reference.waveform);
+    }
+
+    #[test]
+    fn loading_a_file_that_cannot_be_decoded_is_still_a_user_file() {
+        // The C++ sets the flag after the load, so a file that is there but
+        // cannot be decoded is still a user file.
+        let path = std::env::temp_dir().join("rippler_dsp_not_audio.txt");
+        std::fs::write(&path, b"this is not an audio file").expect("the file could not be written");
+
+        let mut sampler = Sampler::new();
+        sampler.load_sample(&path);
+
+        let mut reference = Sampler::new();
+        reference.load_internal_sample(MalletType::Sample1);
+
+        assert_eq!(sampler.waveform, reference.waveform);
+        assert!(sampler.is_user_file);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

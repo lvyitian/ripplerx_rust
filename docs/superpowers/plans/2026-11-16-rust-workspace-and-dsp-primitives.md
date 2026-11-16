@@ -1992,6 +1992,72 @@ JUCE rejects MinGW outright, so this needs the MSVC C++ toolchain. On a machine
 without it, the `git diff` check above is the verification, and the limitation
 should be recorded rather than worked around.
 
+## Decisions carried into Plan 2 (the modal core)
+
+A final whole-crate review raised two questions that have to be answered before
+the modal core is written, because getting them wrong would mean rewriting it.
+Both are settled here.
+
+### 1. `Partial` gets its own biquad, not `Filter`
+
+`Partial::process` in `src/dsp/Partial.cpp` computes:
+
+```cpp
+auto output = ((b0 * input + b2 * x2) - (a1 * y1 + a2 * y2)) / a0;
+```
+
+with `b0 = alpha * tone_gain * amp_k`, `b2 = -b0`, `a0 = 1 + alpha / decay_k`,
+`a1 = -2 * cos(omega)` and `a2 = 1 - alpha / decay_k`.
+
+`Filter::process` in `src/dsp/Filter.cpp` computes a direct form I section:
+
+```cpp
+y0 = b0*x0 + b1*x1 + b2*x2 - a1*y1 - a2*y2;
+```
+
+The two are not the same structure. `Filter` folds the `1/a0` normalisation into
+`a1` and `a2` at construction time, has a `b1` term the partial does not use,
+and its coefficients are immutable apart from `copy_from`. The partial divides
+by `a0` at the end of every sample, and `applyGain` mutates `b0` and `b2` in
+place after construction.
+
+The partial could be expressed through `Filter` by pre-dividing every
+coefficient by `a0`, but that changes the floating-point rounding: the C++
+divides once at the end, the folded form divides four times at construction.
+The whole point of the differential harness is that the ports are bit-identical
+to the C++ rather than merely close, so the division has to stay where the C++
+puts it.
+
+**Decision:** `partial.rs` carries its own small biquad with the C++'s exact
+operation order. `Filter` stays as it is, for the places that want a general
+RBJ response.
+
+### 2. The two lookup tables are owned by the plugin and borrowed
+
+`Partial::a1LUT` and `Partial::sinLUT` are function-local statics in the C++,
+re-initialised whenever the sample rate changes. Rust has no mutable statics
+that can be handed out safely, and `LookupTable` owns a 4096-entry `Vec`, so
+cloning it per partial would be a large allocation on the audio path.
+
+**Decision:** a `Luts` owner struct holding both tables is built once when the
+plugin is activated, and the voice bank borrows it. Because the tables are
+immutable after construction, a sample-rate change replaces the whole voice
+bank rather than mutating the tables in place — which is also what the design
+document's "values owned by the plugin, passed by reference" says.
+
+`Partial` itself should stay free of lifetimes: `apply_pitch_bend` needs the
+`a1` table at runtime, so the resonator threads the borrowed tables through as
+an argument rather than storing them in each partial.
+
+### 3. Smaller things Plan 2 should know
+
+- `Filter::copy_from` copies coefficients only and leaves the history alone,
+  matching the C++ `Filter::copy`. Anything that copies a filter must use it
+  rather than assigning a freshly constructed filter, which would reset the
+  state and diverge from the C++.
+- `Utils::gainTodB` and the frequency conversions are now ported in `utils.rs`
+  and are needed for the resonator's cutoff mapping.
+
 ## Notes for the next plan
 
 - `rippler-dsp` has no dependencies yet. Plan 3 adds `symphonia` for audio

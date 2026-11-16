@@ -8,25 +8,21 @@
 
 use nice_plug::prelude::*;
 use rippler_dsp::envelope::Stage;
-use rippler_dsp::mallet::MalletType;
-use rippler_dsp::models::ModalModel;
-use rippler_dsp::noise::NoiseSettings;
-use rippler_dsp::resonator::ResonatorSettings;
 use rippler_dsp::voice::Voice;
-use rippler_params::enums::{Coupling, NoiseFilterMode, PartialCount};
 use rippler_params::params::RipplerParams;
 
 use crate::RipplerX;
+use crate::block_params::BlockParams;
 use crate::params::pick_voice;
 
 /// The control change number of the sustain pedal.
-const SUSTAIN_PEDAL: u8 = 64;
+pub(crate) const SUSTAIN_PEDAL: u8 = 64;
 
 /// The control change number of "all sound off".
-const ALL_SOUND_OFF: u8 = 120;
+pub(crate) const ALL_SOUND_OFF: u8 = 120;
 
 /// The control change number of "all notes off".
-const ALL_NOTES_OFF: u8 = 123;
+pub(crate) const ALL_NOTES_OFF: u8 = 123;
 
 /// The number of MIDI messages the queue holds.
 ///
@@ -112,350 +108,6 @@ pub(crate) struct MidiState {
     pub bend: Bend,
 }
 
-/// The parameters of one block of audio.
-///
-/// The JUCE build reads every parameter once per block into locals and then
-/// works from those. This is the same thing: the values are plain, so the
-/// loop never has to look at the parameter struct.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct BlockParams {
-    /// The kind of mallet that excites the resonators.
-    pub mallet_type: MalletType,
-    /// The mallet's pitch, in semitones.
-    pub mallet_pitch: f64,
-    /// The mallet's filter.
-    pub mallet_filter: f64,
-    /// The mallet's stiffness.
-    pub mallet_stiff: f64,
-    /// The mallet's key tracking.
-    pub mallet_ktrack: f64,
-
-    /// The noise's offset voltage.
-    pub noise_osc: f64,
-    /// The noise's mix, normalised.
-    pub noise_mix: f64,
-    /// The noise's resonance, normalised.
-    pub noise_res: f64,
-    /// The filter the noise passes through.
-    pub noise_filter_mode: NoiseFilterMode,
-    /// The filter's cutoff frequency.
-    pub noise_filter_freq: f64,
-    /// The filter's quality factor.
-    pub noise_filter_q: f64,
-    /// The noise envelope's attack time.
-    pub noise_att: f64,
-    /// The noise envelope's decay time.
-    pub noise_dec: f64,
-    /// The noise envelope's sustain level.
-    pub noise_sus: f64,
-    /// The noise envelope's release time.
-    pub noise_rel: f64,
-    /// How much the velocity tensions the attack.
-    pub noise_att_ten: f64,
-    /// How much the velocity tensions the decay.
-    pub noise_dec_ten: f64,
-    /// How much the velocity tensions the release.
-    pub noise_rel_ten: f64,
-
-    /// Whether the first resonator sounds.
-    pub a_on: bool,
-    /// The first resonator's model.
-    pub a_model: ModalModel,
-    /// The first resonator's number of partials.
-    pub a_partials: usize,
-    /// The first resonator's decay.
-    pub a_decay: f64,
-    /// The first resonator's damping.
-    pub a_damp: f64,
-    /// The first resonator's tone.
-    pub a_tone: f64,
-    /// The first resonator's strike position.
-    pub a_hit: f64,
-    /// The first resonator's release.
-    pub a_rel: f64,
-    /// The first resonator's inharmonicity.
-    pub a_inharm: f64,
-    /// The first resonator's model ratio.
-    pub a_ratio: f64,
-    /// The first resonator's cutoff.
-    pub a_cut: f64,
-    /// The first resonator's tube radius.
-    pub a_radius: f64,
-    /// The first resonator's coarse pitch.
-    pub a_coarse: f64,
-    /// The first resonator's fine pitch.
-    pub a_fine: f64,
-
-    /// Whether the second resonator sounds.
-    pub b_on: bool,
-    /// The second resonator's model.
-    pub b_model: ModalModel,
-    /// The second resonator's number of partials.
-    pub b_partials: usize,
-    /// The second resonator's decay.
-    pub b_decay: f64,
-    /// The second resonator's damping.
-    pub b_damp: f64,
-    /// The second resonator's tone.
-    pub b_tone: f64,
-    /// The second resonator's strike position.
-    pub b_hit: f64,
-    /// The second resonator's release.
-    pub b_rel: f64,
-    /// The second resonator's inharmonicity.
-    pub b_inharm: f64,
-    /// The second resonator's model ratio.
-    pub b_ratio: f64,
-    /// The second resonator's cutoff.
-    pub b_cut: f64,
-    /// The second resonator's tube radius.
-    pub b_radius: f64,
-    /// The second resonator's coarse pitch.
-    pub b_coarse: f64,
-    /// The second resonator's fine pitch.
-    pub b_fine: f64,
-
-    /// How much the velocity bends the mallet's mix.
-    pub vel_mallet_mix: f64,
-    /// How much the velocity bends the mallet's resonance.
-    pub vel_mallet_res: f64,
-    /// How much the velocity bends the mallet's stiffness.
-    pub vel_mallet_stiff: f64,
-    /// How much the velocity bends the noise's mix.
-    pub vel_noise_mix: f64,
-    /// How much the velocity bends the noise's resonance.
-    pub vel_noise_res: f64,
-    /// How much the velocity bends the noise's frequency.
-    pub vel_noise_freq: f64,
-    /// How much the velocity bends the noise's attack.
-    pub vel_noise_att: f64,
-    /// How much the velocity bends the noise's decay.
-    pub vel_noise_dec: f64,
-    /// How much the velocity bends the noise's sustain.
-    pub vel_noise_sus: f64,
-    /// How much the velocity bends the noise's release.
-    pub vel_noise_rel: f64,
-    /// How much the velocity bends the noise's quality factor.
-    pub vel_noise_q: f64,
-    /// How much the velocity bends the first resonator's decay.
-    pub vel_a_decay: f64,
-    /// How much the velocity bends the first resonator's strike position.
-    pub vel_a_hit: f64,
-    /// How much the velocity bends the first resonator's inharmonicity.
-    pub vel_a_inharm: f64,
-    /// How much the velocity bends the first resonator's damping.
-    pub vel_a_damp: f64,
-    /// How much the velocity bends the first resonator's tone.
-    pub vel_a_tone: f64,
-    /// How much the velocity bends the second resonator's decay.
-    pub vel_b_decay: f64,
-    /// How much the velocity bends the second resonator's strike position.
-    pub vel_b_hit: f64,
-    /// How much the velocity bends the second resonator's inharmonicity.
-    pub vel_b_inharm: f64,
-    /// How much the velocity bends the second resonator's damping.
-    pub vel_b_damp: f64,
-    /// How much the velocity bends the second resonator's tone.
-    pub vel_b_tone: f64,
-
-    /// Whether the resonators are coupled in series.
-    pub couple: bool,
-    /// How much of each resonator reaches the output.
-    pub ab_mix: f64,
-    /// Where the second resonator is fed from in a serial coupling.
-    pub ab_split: f64,
-    /// The output's gain, as a factor.
-    pub gain: f64,
-    /// The pitch bend's range, in semitones.
-    pub bend_range: f64,
-    /// Whether the output is spread over the stereo field.
-    pub stereoizer: bool,
-    /// Whether a voice is reused for the next note.
-    pub reuse_voices: bool,
-    /// Whether a repeated note fades the previous one out.
-    pub fadeout_repeats: bool,
-}
-
-impl BlockParams {
-    /// Reads the parameters.
-    pub(crate) fn read(params: &RipplerParams) -> Self {
-        let noise_mix_range = params.noise.noise_mix.range();
-        let noise_res_range = params.noise.noise_res.range();
-
-        let couple = params.couple.value() == Coupling::Series;
-
-        Self {
-            mallet_type: params.mallet.mallet_type.value(),
-            mallet_pitch: params.mallet.mallet_pitch.value() as f64,
-            mallet_filter: params.mallet.mallet_filter.value() as f64,
-            mallet_stiff: params.mallet.mallet_stiff.value() as f64,
-            mallet_ktrack: params.mallet.mallet_ktrack.value() as f64,
-
-            noise_osc: params.noise.noise_osc.value() as f64,
-            // The JUCE build normalises the noise's mix and resonance once
-            // per block, and unnormalises them again for every voice.
-            noise_mix: noise_mix_range.normalize(params.noise.noise_mix.value()) as f64,
-            noise_res: noise_res_range.normalize(params.noise.noise_res.value()) as f64,
-            noise_filter_mode: params.noise.noise_filter_mode.value(),
-            noise_filter_freq: params.noise.noise_filter_freq.value() as f64,
-            noise_filter_q: params.noise.noise_filter_q.value() as f64,
-            noise_att: params.noise.noise_att.value() as f64,
-            noise_dec: params.noise.noise_dec.value() as f64,
-            noise_sus: params.noise.noise_sus.value() as f64,
-            noise_rel: params.noise.noise_rel.value() as f64,
-            noise_att_ten: params.noise.noise_att_ten.value() as f64,
-            noise_dec_ten: params.noise.noise_dec_ten.value() as f64,
-            noise_rel_ten: params.noise.noise_rel_ten.value() as f64,
-
-            a_on: params.resonator_a.a_on.value(),
-            a_model: params.resonator_a.a_model.value(),
-            a_partials: partial_count(params.resonator_a.a_partials.value()),
-            a_decay: params.resonator_a.a_decay.value() as f64,
-            a_damp: params.resonator_a.a_damp.value() as f64,
-            a_tone: params.resonator_a.a_tone.value() as f64,
-            a_hit: params.resonator_a.a_hit.value() as f64,
-            a_rel: params.resonator_a.a_rel.value() as f64,
-            a_inharm: params.resonator_a.a_inharm.value() as f64,
-            a_ratio: params.resonator_a.a_ratio.value() as f64,
-            a_cut: params.resonator_a.a_cut.value() as f64,
-            a_radius: params.resonator_a.a_radius.value() as f64,
-            a_coarse: params.resonator_a.a_coarse.value() as f64,
-            a_fine: params.resonator_a.a_fine.value() as f64,
-
-            b_on: params.resonator_b.b_on.value(),
-            b_model: params.resonator_b.b_model.value(),
-            b_partials: partial_count(params.resonator_b.b_partials.value()),
-            b_decay: params.resonator_b.b_decay.value() as f64,
-            b_damp: params.resonator_b.b_damp.value() as f64,
-            b_tone: params.resonator_b.b_tone.value() as f64,
-            b_hit: params.resonator_b.b_hit.value() as f64,
-            b_rel: params.resonator_b.b_rel.value() as f64,
-            b_inharm: params.resonator_b.b_inharm.value() as f64,
-            b_ratio: params.resonator_b.b_ratio.value() as f64,
-            b_cut: params.resonator_b.b_cut.value() as f64,
-            b_radius: params.resonator_b.b_radius.value() as f64,
-            b_coarse: params.resonator_b.b_coarse.value() as f64,
-            b_fine: params.resonator_b.b_fine.value() as f64,
-
-            vel_mallet_mix: params.velocity.vel_mallet_mix.value() as f64,
-            vel_mallet_res: params.velocity.vel_mallet_res.value() as f64,
-            vel_mallet_stiff: params.velocity.vel_mallet_stiff.value() as f64,
-            vel_noise_mix: params.velocity.vel_noise_mix.value() as f64,
-            vel_noise_res: params.velocity.vel_noise_res.value() as f64,
-            vel_noise_freq: params.velocity.vel_noise_freq.value() as f64,
-            vel_noise_att: params.velocity.vel_noise_att.value() as f64,
-            vel_noise_dec: params.velocity.vel_noise_dec.value() as f64,
-            vel_noise_sus: params.velocity.vel_noise_sus.value() as f64,
-            vel_noise_rel: params.velocity.vel_noise_rel.value() as f64,
-            vel_noise_q: params.velocity.vel_noise_q.value() as f64,
-            vel_a_decay: params.velocity.vel_a_decay.value() as f64,
-            vel_a_hit: params.velocity.vel_a_hit.value() as f64,
-            vel_a_inharm: params.velocity.vel_a_inharm.value() as f64,
-            vel_a_damp: params.velocity.vel_a_damp.value() as f64,
-            vel_a_tone: params.velocity.vel_a_tone.value() as f64,
-            vel_b_decay: params.velocity.vel_b_decay.value() as f64,
-            vel_b_hit: params.velocity.vel_b_hit.value() as f64,
-            vel_b_inharm: params.velocity.vel_b_inharm.value() as f64,
-            vel_b_damp: params.velocity.vel_b_damp.value() as f64,
-            vel_b_tone: params.velocity.vel_b_tone.value() as f64,
-
-            couple,
-            ab_mix: params.ab_mix.value() as f64,
-            ab_split: params.ab_split.value() as f64 * 100.0,
-            gain: 10.0f64.powf(params.gain.value() as f64 / 20.0),
-            bend_range: params.bend_range.value() as f64,
-            stereoizer: params.stereoizer.value(),
-            reuse_voices: params.reuse_voices.value(),
-            fadeout_repeats: params.fadeout_repeats.value(),
-        }
-    }
-
-    /// The settings of the noise generator.
-    pub(crate) fn noise_settings(&self) -> NoiseSettings {
-        NoiseSettings {
-            filter_mode: match self.noise_filter_mode {
-                NoiseFilterMode::LowPass => 0,
-                NoiseFilterMode::BandPass => 1,
-                NoiseFilterMode::HighPass => 2,
-            },
-            freq: self.noise_filter_freq,
-            q: self.noise_filter_q,
-            attack: self.noise_att,
-            decay: self.noise_dec,
-            sustain: self.noise_sus,
-            release: self.noise_rel,
-            vel_freq: self.vel_noise_freq,
-            vel_q: self.vel_noise_q,
-            att_ten: self.noise_att_ten,
-            dec_ten: self.noise_dec_ten,
-            rel_ten: self.noise_rel_ten,
-            vel_att: self.vel_noise_att,
-            vel_dec: self.vel_noise_dec,
-            vel_sus: self.vel_noise_sus,
-            vel_rel: self.vel_noise_rel,
-        }
-    }
-
-    /// The settings of the first resonator.
-    pub(crate) fn resonator_a_settings(&self) -> ResonatorSettings {
-        ResonatorSettings {
-            on: self.a_on,
-            model: self.a_model,
-            partials: self.a_partials,
-            decay: self.a_decay,
-            damp: self.a_damp,
-            tone: self.a_tone,
-            hit: self.a_hit,
-            rel: self.a_rel,
-            inharm: self.a_inharm,
-            cut: self.a_cut,
-            radius: self.a_radius,
-            vel_decay: self.vel_a_decay,
-            vel_hit: self.vel_a_hit,
-            vel_inharm: self.vel_a_inharm,
-            vel_damp: self.vel_a_damp,
-            vel_tone: self.vel_a_tone,
-        }
-    }
-
-    /// The settings of the second resonator.
-    pub(crate) fn resonator_b_settings(&self) -> ResonatorSettings {
-        ResonatorSettings {
-            on: self.b_on,
-            model: self.b_model,
-            partials: self.b_partials,
-            decay: self.b_decay,
-            damp: self.b_damp,
-            tone: self.b_tone,
-            hit: self.b_hit,
-            rel: self.b_rel,
-            inharm: self.b_inharm,
-            cut: self.b_cut,
-            radius: self.b_radius,
-            vel_decay: self.vel_b_decay,
-            vel_hit: self.vel_b_hit,
-            vel_inharm: self.vel_b_inharm,
-            vel_damp: self.vel_b_damp,
-            vel_tone: self.vel_b_tone,
-        }
-    }
-}
-
-/// The number of partials a choice stands for.
-///
-/// The C++ converts the choice's index into a number of partials.
-fn partial_count(count: PartialCount) -> usize {
-    match count {
-        PartialCount::Four => 4,
-        PartialCount::Eight => 8,
-        PartialCount::Sixteen => 16,
-        PartialCount::ThirtyTwo => 32,
-        PartialCount::SixtyFour => 64,
-        PartialCount::One => 1,
-        PartialCount::Two => 2,
-    }
-}
-
 impl RipplerX {
     /// Queues a note event for the block that is about to be processed.
     ///
@@ -471,11 +123,22 @@ impl RipplerX {
                 velocity,
                 ..
             } => {
+                // JUCE's `juce::MidiMessage::isNoteOff` is true for a note
+                // on with a velocity of zero, so the C++ releases the note
+                // rather than pressing it. nice-plug does not normalise the
+                // velocity, so the same is done here: a note on without a
+                // velocity is a note off.
+                let (kind, vel) = if velocity <= 0.0 {
+                    (MidiMsgType::NoteOff, 0.0)
+                } else {
+                    (MidiMsgType::NoteOn, velocity as f64)
+                };
+
                 self.push_midi(MidiMsg {
                     offset: timing as i32,
-                    kind: MidiMsgType::NoteOn,
+                    kind,
                     note: key.number_or_middle_c() as i32,
-                    vel: velocity as f64,
+                    vel,
                 });
             }
             NoteEvent::NoteOff { timing, key, .. } => {
@@ -545,7 +208,7 @@ impl RipplerX {
     /// [`RipplerX::queue_event`] before this is called.
     pub(crate) fn process_block(&mut self, buffer: &mut Buffer) {
         let num_samples = buffer.samples();
-        let block = BlockParams::read(&self.params);
+        let block = BlockParams::read(&self.params, self.noise_mix_range, self.noise_res_range);
 
         // The parameters are applied to the voices, the way the JUCE build's
         // `onSlider` does. This happens before the MIDI is handled, so a
@@ -570,6 +233,13 @@ impl RipplerX {
             ..
         } = self;
 
+        // The lookup tables are built when the plugin is activated. A plugin
+        // that was never activated has none, and there is nothing it can do
+        // with the block, so it leaves the buffer alone.
+        let Some(luts) = luts.as_ref() else {
+            return;
+        };
+
         let srate = *srate;
         let polyphony = (*polyphony).min(voices.len()).min(rngs.len());
 
@@ -579,6 +249,11 @@ impl RipplerX {
         // The input is read from the same buffer the output is written to, so
         // the input of a sample is read before the output of that sample is
         // written.
+        //
+        // nice-plug exposes the main input only through the output buffer,
+        // so this is the only place the input can come from. A host that
+        // connects no input bus leaves whatever it had in the buffer there,
+        // and the plugin sums that, where the C++ sums zero channels.
         let channels = buffer.as_slice();
         let num_channels = channels.len();
 
@@ -625,16 +300,6 @@ impl RipplerX {
                 audio_in /= input_channels as f64;
             }
 
-            // The parameters that scale with the velocity are read for every
-            // sample, the way the JUCE build reads them.
-            let mallet_mix = params.mallet.mallet_mix.value() as f64;
-            let mallet_res = params.mallet.mallet_res.value() as f64;
-            let vel_mallet_mix = params.velocity.vel_mallet_mix.value() as f64;
-            let vel_mallet_res = params.velocity.vel_mallet_res.value() as f64;
-            let noise_osc = params.noise.noise_osc.value() as f64;
-            let vel_noise_mix = params.velocity.vel_noise_mix.value() as f64;
-            let vel_noise_res = params.velocity.vel_noise_res.value() as f64;
-
             let mut dir_out = 0.0;
             let mut a_out = 0.0;
             let mut b_out = 0.0;
@@ -660,9 +325,10 @@ impl RipplerX {
                 let m_sample = voice.mallet.process(sampler);
                 if m_sample != 0.0 {
                     dir_out += m_sample
-                        * (mallet_mix + vel_mallet_mix * voice.vel).clamp(0.0, 1.0)
+                        * (block.mallet_mix + block.vel_mallet_mix * voice.vel).clamp(0.0, 1.0)
                         * voice_fade_out;
-                    res_out += m_sample * (mallet_res + vel_mallet_res * voice.vel).clamp(0.0, 1.0);
+                    res_out += m_sample
+                        * (block.mallet_res + block.vel_mallet_res * voice.vel).clamp(0.0, 1.0);
                 }
 
                 // The audio input.
@@ -673,20 +339,24 @@ impl RipplerX {
                 // The noise.
                 let noise = voice.noise.process(&mut rngs[index]);
                 if voice.noise.env.state != Stage::Off {
-                    let osc = if noise_osc > 0.0 && (block.noise_res > 0.0 || vel_noise_res > 0.0) {
+                    let osc = if block.noise_osc > 0.0
+                        && (block.noise_res > 0.0 || block.vel_noise_res > 0.0)
+                    {
                         let b = voice.process_oscillators(false, luts);
                         let a = voice.process_oscillators(true, luts);
-                        voice.noise.process_osc(a + b) * noise_osc
+                        voice.noise.process_osc(a + b) * block.noise_osc
                     } else {
                         0.0
                     };
 
-                    let mix = (block.noise_mix + vel_noise_mix * voice.vel).clamp(0.0, 1.0) as f32;
+                    let mix =
+                        (block.noise_mix + block.vel_noise_mix * voice.vel).clamp(0.0, 1.0) as f32;
                     dir_out += noise * noise_mix_range.unnormalize(mix) as f64 * voice_fade_out;
 
-                    let res = (block.noise_res + vel_noise_res * voice.vel).clamp(0.0, 1.0) as f32;
-                    res_out +=
-                        (noise * (1.0 - noise_osc) + osc) * noise_res_range.unnormalize(res) as f64;
+                    let res =
+                        (block.noise_res + block.vel_noise_res * voice.vel).clamp(0.0, 1.0) as f32;
+                    res_out += (noise * (1.0 - block.noise_osc) + osc)
+                        * noise_res_range.unnormalize(res) as f64;
                 }
 
                 // The first resonator.
@@ -904,126 +574,17 @@ fn set_bend_target(bend: &mut Bend, pitch_wheel: f64, bend_range: f64) {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-    use nice_plug::midi::{Channel, Key, VoiceID};
-    use nice_plug_core::params::InternalParamMut;
-
-    /// The sample rate the tests run at.
-    const SRATE: f64 = 44100.0;
-
-    /// A plugin with its voices allocated.
-    pub(crate) fn plugin() -> RipplerX {
-        let mut plugin = RipplerX::default();
-        plugin.prepare(SRATE);
-        plugin
-    }
-
-    /// Sets a parameter's value, the way the host does.
-    pub(crate) fn set<T: InternalParamMut>(param: &T, value: T::Plain) {
-        unsafe {
-            param._internal_set_plain_value(value);
-        }
-    }
-
-    /// A note on event.
-    pub(crate) fn note_on(note: u8, velocity: f32, timing: u32) -> NoteEvent<()> {
-        NoteEvent::<()>::NoteOn {
-            timing,
-            voice_id: VoiceID::Wildcard,
-            channel: Channel::Number(0),
-            key: Key::Number(note),
-            velocity,
-        }
-    }
-
-    /// A note off event.
-    pub(crate) fn note_off(note: u8, timing: u32) -> NoteEvent<()> {
-        NoteEvent::<()>::NoteOff {
-            timing,
-            voice_id: VoiceID::Wildcard,
-            channel: Channel::Number(0),
-            key: Key::Number(note),
-            velocity: 0.0,
-        }
-    }
-
-    /// A control change event.
-    pub(crate) fn control_change(cc: u8, value: f32, timing: u32) -> NoteEvent<()> {
-        NoteEvent::<()>::MidiCC {
-            timing,
-            channel: 0,
-            cc,
-            value,
-        }
-    }
-
-    /// The sustain pedal, down or up.
-    pub(crate) fn sustain(down: bool, timing: u32) -> NoteEvent<()> {
-        control_change(SUSTAIN_PEDAL, if down { 1.0 } else { 0.0 }, timing)
-    }
-
-    /// A pitch wheel event.
-    pub(crate) fn pitch_wheel(value: u16, timing: u32) -> NoteEvent<()> {
-        NoteEvent::<()>::MidiPitchBend {
-            timing,
-            channel: 0,
-            value: value as f32 / 16383.0,
-        }
-    }
-
-    /// Runs one block of audio through the plugin.
-    pub(crate) fn run(
-        plugin: &mut RipplerX,
-        num_samples: usize,
-        events: &[NoteEvent<()>],
-    ) -> (Vec<f32>, Vec<f32>) {
-        for event in events {
-            plugin.queue_event(*event);
-        }
-
-        let mut left = vec![0.0f32; num_samples];
-        let mut right = vec![0.0f32; num_samples];
-
-        {
-            let mut buffer = Buffer::default();
-            unsafe {
-                buffer.set_slices(num_samples, |slices| {
-                    *slices = vec![&mut left[..], &mut right[..]];
-                });
-            }
-            plugin.process_block(&mut buffer);
-        }
-
-        (left, right)
-    }
-
-    /// The loudest sample of a block.
-    pub(crate) fn peak(samples: &[f32]) -> f32 {
-        samples
-            .iter()
-            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
-    }
-
-    /// Runs enough samples for the stereoizer's delay line to be flushed.
-    ///
-    /// The comb filter holds twenty milliseconds of the signal, so the
-    /// output is not silent right after the voices are silenced.
-    pub(crate) fn settle(plugin: &mut RipplerX) {
-        run(plugin, 1024, &[]);
-    }
-
-    /// A plugin whose notes release quickly.
-    pub(crate) fn short_release_plugin() -> RipplerX {
-        let plugin = plugin();
-        set(&plugin.params.resonator_a.a_rel, 0.01f32);
-        set(&plugin.params.resonator_b.b_rel, 0.01f32);
-        plugin
-    }
+    use crate::test_helpers::{
+        control_change, new_plugin, note_off, note_on, peak, pitch_wheel, run, run_with_input, set,
+        settle, short_release_plugin, sustain,
+    };
+    use rippler_params::enums::Coupling;
 
     #[test]
     fn a_note_starts_a_voice() {
-        let mut plugin = plugin();
+        let mut plugin = new_plugin();
 
         let (left, right) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
 
@@ -1048,6 +609,28 @@ pub(crate) mod tests {
             peak(&left) < 1e-6,
             "the voice is still sounding: {}",
             peak(&left)
+        );
+    }
+
+    #[test]
+    fn a_note_on_without_a_velocity_releases_the_note() {
+        let mut plugin = short_release_plugin();
+
+        // The note sounds.
+        run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+        assert!(plugin.voices[0].is_pressed, "the note is not playing");
+        assert_eq!(plugin.midi.press_count, 1);
+
+        // A note on with a velocity of zero is a note off, the way JUCE
+        // reads it, so the note is released rather than pressed again.
+        run(&mut plugin, 64, &[note_on(60, 0.0, 0)]);
+        assert!(
+            !plugin.voices[0].is_pressed,
+            "the note was pressed again instead of released"
+        );
+        assert_eq!(
+            plugin.midi.press_count, 1,
+            "the note was pressed again instead of released"
         );
     }
 
@@ -1113,7 +696,7 @@ pub(crate) mod tests {
 
     #[test]
     fn all_notes_off_clears_the_voices() {
-        let mut plugin = plugin();
+        let mut plugin = new_plugin();
 
         let (left, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
         assert!(peak(&left) > 0.0, "the note did not make a sound");
@@ -1129,7 +712,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_pitch_wheel_glides_rather_than_jumping() {
-        let mut plugin = plugin();
+        let mut plugin = new_plugin();
 
         // The pitch wheel is bent all the way up.
         run(&mut plugin, 1, &[pitch_wheel(16383, 0)]);
@@ -1148,7 +731,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_output_is_stereo() {
-        let mut plugin = plugin();
+        let mut plugin = new_plugin();
 
         let (left, right) = run(&mut plugin, 4096, &[note_on(60, 0.8, 0)]);
 
@@ -1156,5 +739,153 @@ pub(crate) mod tests {
             left.iter().zip(right.iter()).any(|(l, r)| l != r),
             "the stereoizer did not spread the sound"
         );
+    }
+
+    #[test]
+    fn the_audio_input_excites_the_resonators() {
+        // The note sounds, and the input is silent.
+        let mut plugin = new_plugin();
+        run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+        let (without_input, _) = run(&mut plugin, 1024, &[]);
+
+        // The same note, with a signal on the input.
+        let mut plugin = new_plugin();
+        run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+        let input = vec![0.5f32; 1024];
+        let (with_input, _) = run_with_input(&mut plugin, 1024, &input, &[]);
+
+        assert!(
+            with_input
+                .iter()
+                .zip(without_input.iter())
+                .any(|(with, without)| with != without),
+            "the input did not reach the resonators"
+        );
+        assert!(
+            peak(&with_input) > peak(&without_input),
+            "the input did not make the resonators louder"
+        );
+    }
+
+    #[test]
+    fn the_audio_input_only_reaches_a_pressed_voice() {
+        // The C++ only adds the input to the resonators of the voices that
+        // are pressed, so an input without a note makes no sound at all.
+        let mut plugin = new_plugin();
+        let input = vec![0.5f32; 1024];
+        let (left, right) = run_with_input(&mut plugin, 1024, &input, &[]);
+
+        assert_eq!(peak(&left), 0.0, "the input made a sound");
+        assert_eq!(peak(&right), 0.0, "the input made a sound");
+    }
+
+    #[test]
+    fn the_mix_follows_the_mix_parameter() {
+        // With the mix at zero the output is the first resonator's, and
+        // with the mix at one it is the second's.
+        let mut plugin = new_plugin();
+        set(&plugin.params.resonator_b.b_on, true);
+        set(&plugin.params.ab_mix, 0.0f32);
+        let (all_a, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+
+        let mut plugin = new_plugin();
+        set(&plugin.params.resonator_b.b_on, true);
+        set(&plugin.params.ab_mix, 1.0f32);
+        let (all_b, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+
+        // The first resonator on its own gives the same output as the mix
+        // at zero.
+        let mut plugin = new_plugin();
+        set(&plugin.params.resonator_b.b_on, false);
+        let (only_a, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+        assert_eq!(all_a, only_a, "the mix at zero is not the first resonator");
+
+        // The second resonator on its own gives the same output as the mix
+        // at one.
+        let mut plugin = new_plugin();
+        set(&plugin.params.resonator_a.a_on, false);
+        set(&plugin.params.resonator_b.b_on, true);
+        let (only_b, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+        assert_eq!(all_b, only_b, "the mix at one is not the second resonator");
+    }
+
+    #[test]
+    fn the_serial_coupling_ignores_the_mix_and_uses_the_split() {
+        // With the resonators coupled in series the output is the second
+        // resonator's, whatever the mix says.
+        let mut plugin = new_plugin();
+        set(&plugin.params.resonator_b.b_on, true);
+        set(&plugin.params.couple, Coupling::Series);
+        set(&plugin.params.ab_mix, 0.0f32);
+        let (mix_zero, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+
+        let mut plugin = new_plugin();
+        set(&plugin.params.resonator_b.b_on, true);
+        set(&plugin.params.couple, Coupling::Series);
+        set(&plugin.params.ab_mix, 1.0f32);
+        let (mix_one, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+
+        assert_eq!(
+            mix_zero, mix_one,
+            "the mix changed the output of the serial coupling"
+        );
+
+        // The split is the strength of the coupling, and it changes the
+        // sound the two resonators make together.
+        let mut plugin = new_plugin();
+        set(&plugin.params.resonator_b.b_on, true);
+        set(&plugin.params.couple, Coupling::Series);
+        set(&plugin.params.ab_split, 0.5f32);
+        let (split, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+
+        assert!(
+            split != mix_zero,
+            "the split did not change the sound of the coupling"
+        );
+    }
+
+    #[test]
+    fn the_limiter_bounds_a_loud_signal() {
+        let mut plugin = new_plugin();
+
+        // A note, and a loud signal on the input.
+        run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+        let input = vec![4.0f32; 8192];
+        let (left, _) = run_with_input(&mut plugin, 8192, &input, &[]);
+
+        assert!(peak(&left) > 0.0, "the signal made no sound at all");
+        assert!(
+            left.iter().all(|sample| sample.is_finite()),
+            "the signal is not finite"
+        );
+
+        // The limiter lets the first samples through, but it bounds the
+        // signal, which came in at four.
+        assert!(
+            peak(&left) < 2.0,
+            "the limiter did not bound the signal: {}",
+            peak(&left)
+        );
+
+        let settled = &left[1024..];
+        assert!(
+            peak(settled) < 1.5,
+            "the limiter did not bound the signal: {}",
+            peak(settled)
+        );
+    }
+
+    #[test]
+    fn a_control_change_clears_the_voices() {
+        let mut plugin = new_plugin();
+
+        let (left, _) = run(&mut plugin, 1024, &[note_on(60, 0.8, 0)]);
+        assert!(peak(&left) > 0.0, "the note did not make a sound");
+
+        // The "all sound off" control change clears the voices.
+        run(&mut plugin, 1024, &[control_change(ALL_SOUND_OFF, 0.0, 0)]);
+        settle(&mut plugin);
+        let (left, _) = run(&mut plugin, 1024, &[]);
+        assert!(peak(&left) < 1e-6, "the voice is still sounding");
     }
 }

@@ -4,16 +4,21 @@
 //! parameters, and drives the per-sample loop that `src/PluginProcessor.cpp`
 //! runs.
 
+pub mod block_params;
 pub mod identity;
 pub mod params;
 pub mod process;
 pub mod tuning;
+
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 use mts_client_rs::Client;
 use nice_plug::prelude::*;
 use rippler_dsp::comb::Comb;
 use rippler_dsp::limiter::Limiter;
 use rippler_dsp::luts::Luts;
+use rippler_dsp::mallet::MalletType;
 use rippler_dsp::models::ModelTables;
 use rippler_dsp::rng::Rng;
 use rippler_dsp::sampler::Sampler;
@@ -21,7 +26,7 @@ use rippler_dsp::voice::Voice;
 use rippler_params::params::RipplerParams;
 use std::sync::Arc;
 
-use crate::params::ParamState;
+use crate::params::{MALLET_TYPE_COUNT, ParamState, PreparedSample, prepare_internal_samples};
 use crate::process::{MIDI_QUEUE_CAPACITY, MidiState};
 
 /// The number of voices the plugin has, `globals::MAX_POLYPHONY`.
@@ -52,7 +57,10 @@ pub struct RipplerX {
     /// The current model tables.
     models: ModelTables,
     /// The lookup tables the partials need.
-    luts: Luts,
+    ///
+    /// The tables are built when the plugin is activated, because they are
+    /// expensive and a plugin that was never activated does not need them.
+    luts: Option<Luts>,
     /// The comb filter that spreads the output over the stereo field.
     comb: Comb,
     /// The limiter.
@@ -71,6 +79,18 @@ pub struct RipplerX {
     noise_mix_range: FloatRange,
     /// The range of the noise's resonance.
     noise_res_range: FloatRange,
+    /// The bundled samples, decoded when the plugin was activated.
+    ///
+    /// The cache holds every bundled sample but the one that is in the
+    /// sampler, so that a change of the mallet type is a move of a
+    /// waveform rather than a decoding on the audio thread.
+    internal_samples: [Option<PreparedSample>; MALLET_TYPE_COUNT],
+    /// The mallet type whose sample is in the sampler.
+    ///
+    /// It is `None` when the sampler does not hold one of the bundled
+    /// samples, which is the case before the first one is loaded and after
+    /// a user file has been loaded instead.
+    loaded_sample: Option<MalletType>,
     /// The MTS-ESP client, if the library is installed.
     ///
     /// The client is created on the thread that builds the plugin, which is
@@ -79,14 +99,24 @@ pub struct RipplerX {
 }
 
 impl Default for RipplerX {
+    /// Builds a plugin that has not been activated yet.
+    ///
+    /// Everything that depends on the sample rate is provisional here and is
+    /// built again by [`RipplerX::prepare`], which is where the plugin is
+    /// activated. The defaults are deliberately cheap: the lookup tables are
+    /// the expensive part, so they are not built at all until the plugin is
+    /// activated.
     fn default() -> Self {
         Self {
             params: Arc::new(RipplerParams::default()),
             voices: Vec::new(),
             sampler: Sampler::new(),
             models: ModelTables::new(),
-            luts: Luts::new(44100.0),
+            luts: None,
             comb: Comb::new(),
+            // The limiter and the sample rate are provisional: they are
+            // built again for the plugin's own sample rate when the plugin
+            // is activated.
             limiter: Limiter::new(44100.0),
             rngs: Vec::new(),
             srate: 44100.0,
@@ -95,6 +125,8 @@ impl Default for RipplerX {
             params_state: ParamState::default(),
             noise_mix_range: FloatRange::Linear { min: 0.0, max: 1.0 },
             noise_res_range: FloatRange::Linear { min: 0.0, max: 1.0 },
+            internal_samples: std::array::from_fn(|_| None),
+            loaded_sample: None,
             // The client is optional: without the MTS-ESP library the
             // plugin falls back to the equal temperament.
             tuning: Client::new().ok(),
@@ -189,9 +221,14 @@ impl RipplerX {
             .map(|index| Rng::new(index as u64 + 1))
             .collect();
         self.sampler = Sampler::new();
-        self.luts = Luts::new(self.srate);
+        self.luts = Some(Luts::new(self.srate));
         self.comb.init(self.srate);
         self.limiter = Limiter::new(self.srate);
+
+        // The bundled samples are decoded here, so that a change of the
+        // mallet type does not decode anything on the audio thread.
+        self.internal_samples = prepare_internal_samples();
+        self.loaded_sample = None;
 
         // The ranges of the noise's mix and resonance never change, so they
         // are read once here.

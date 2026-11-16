@@ -76,10 +76,15 @@ All 77 parameters keep their **exact legacy IDs** (`a_decay`, `mallet_type`,
 
 ### 2.1 Range mapping
 
-JUCE's `NormalisableRange` with skew `s > 0` normalizes as `p^(1/(1+s))`. nice-plug's
-`FloatRange::Skewed` normalizes as `p^factor`. Therefore `factor = 1/(1+s)` reproduces
-JUCE's skew exactly, and every skewed parameter in RipplerX uses a positive skew
-(0.2, 0.3, 0.5, 1.0). Unskewed ranges map to `FloatRange::Linear`.
+JUCE's `NormalisableRange` uses the skew **directly as the exponent** — `p^skew` —
+and a skew of exactly `1.0` means a **linear** range, because JUCE short-circuits
+that case before the power. nice-plug's `FloatRange::Skewed` also computes
+`p^factor`. Therefore `factor = skew` reproduces JUCE's curve exactly, and a skew
+of `1.0` maps to `FloatRange::Linear` rather than to a square root.
+
+Every skewed parameter in RipplerX uses a positive skew (0.2, 0.3 and 0.5), and
+the coarse and fine pitch parameters use a skew of `1.0`, which means they are
+linear and sit at the centre of their travel.
 
 The knob feel, automation curves, and the host's generic editor therefore behave
 identically to the JUCE build, and legacy XML values transfer without round-trip loss.
@@ -302,7 +307,7 @@ build of the JUCE plugin and hard-coded in the `Vst3Plugin` impl. The CLAP ID st
 | egui's widget set can't reproduce the JUCE look | Custom-paint the knob, tension and meter widgets; the palette is already centralised in `Globals.h` |
 | `symphonia` decodes the bundled FLACs differently than JUCE | Assert decoded length and peak normalisation in a test against known values |
 | The sidechain input bus isn't exposed as a main input in some hosts | Verify in Reaper and a CLAP host early; the aux-port path is the fallback |
-| 77 parameters with skewed ranges drift from the JUCE feel | The skew equivalence is exact, and a test asserts it for every parameter |
+| 77 parameters with skewed ranges drift from the JUCE feel | The skew equivalence is exact — JUCE's skew is the exponent — and a test asserts it against JUCE's definition for every parameter |
 | Legacy sessions do not restore | Accepted: editor import action plus CLI converter |
 
 ## 11. Out of scope

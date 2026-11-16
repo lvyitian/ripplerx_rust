@@ -16,3 +16,4 @@ pub mod models;
 pub mod partial;
 pub mod rng;
 pub mod utils;
+pub mod waveguide;

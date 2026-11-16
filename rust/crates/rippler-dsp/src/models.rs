@@ -830,6 +830,84 @@ pub fn djembe(freq: f64, ratio: f64) -> Ratios {
     table
 }
 
+/// The current model tables for both resonators.
+///
+/// The C++ keeps a table per model per side and mutates the beam, membrane
+/// and plate tables in place when the ratio parameter changes, on the message
+/// thread, while the audio thread reads them. Here the tables are owned by
+/// the plugin and only ever touched on the audio thread.
+#[derive(Clone, Debug)]
+pub struct ModelTables {
+    a: [Ratios; 12],
+    b: [Ratios; 12],
+}
+
+impl ModelTables {
+    /// Creates the tables with the shipped models on both sides.
+    pub fn new() -> Self {
+        const ALL_MODELS: [ModalModel; 12] = [
+            ModalModel::String,
+            ModalModel::Beam,
+            ModalModel::Squared,
+            ModalModel::Membrane,
+            ModalModel::Plate,
+            ModalModel::Drumhead,
+            ModalModel::Marimba,
+            ModalModel::OpenTube,
+            ModalModel::ClosedTube,
+            ModalModel::Marimba2,
+            ModalModel::Bell,
+            ModalModel::Djembe,
+        ];
+
+        let mut a = [[0.0; MAX_PARTIALS]; 12];
+        let mut b = [[0.0; MAX_PARTIALS]; 12];
+
+        for model in ALL_MODELS {
+            let table = *ratios(model);
+            a[model_index(model)] = table;
+            b[model_index(model)] = table;
+        }
+
+        Self { a, b }
+    }
+
+    /// The table of the first resonator.
+    pub fn a(&self, model: ModalModel) -> &Ratios {
+        &self.a[model_index(model)]
+    }
+
+    /// The table of the second resonator.
+    pub fn b(&self, model: ModalModel) -> &Ratios {
+        &self.b[model_index(model)]
+    }
+
+    /// Recomputes the table of a model for one of the two sides.
+    ///
+    /// Only the beam, the membrane and the plate depend on the ratio
+    /// parameter, so every other model is left alone.
+    pub fn recalc(&mut self, res_a: bool, model: ModalModel, ratio: f64) {
+        let table = match model {
+            ModalModel::Beam => beam(ratio),
+            ModalModel::Membrane => membrane(ratio),
+            ModalModel::Plate => plate(ratio),
+            _ => return,
+        };
+
+        if res_a {
+            self.a[model_index(model)] = table;
+        } else {
+            self.b[model_index(model)] = table;
+        }
+    }
+}
+
+impl Default for ModelTables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,5 +1125,55 @@ mod tests {
         ] {
             assert_eq!(gains(model), flat, "{model:?} has gains of its own");
         }
+    }
+}
+
+#[cfg(test)]
+mod model_tables_tests {
+    use super::*;
+
+    #[test]
+    fn the_tables_start_as_copies_of_the_shipped_models() {
+        let tables = ModelTables::new();
+
+        for model in [
+            ModalModel::String,
+            ModalModel::Beam,
+            ModalModel::Squared,
+            ModalModel::Membrane,
+            ModalModel::Plate,
+            ModalModel::Drumhead,
+            ModalModel::Marimba,
+            ModalModel::OpenTube,
+            ModalModel::ClosedTube,
+            ModalModel::Marimba2,
+            ModalModel::Bell,
+            ModalModel::Djembe,
+        ] {
+            assert_eq!(tables.a(model), ratios(model), "{model:?} differs");
+            assert_eq!(tables.b(model), ratios(model), "{model:?} differs");
+        }
+    }
+
+    #[test]
+    fn only_the_ratio_models_are_recalculated() {
+        let mut tables = ModelTables::new();
+
+        tables.recalc(true, ModalModel::Beam, 0.5);
+        assert_eq!(tables.a(ModalModel::Beam), &beam(0.5));
+        // The other side is left alone.
+        assert_eq!(tables.b(ModalModel::Beam), ratios(ModalModel::Beam));
+
+        tables.recalc(false, ModalModel::Membrane, 0.78);
+        assert_eq!(tables.b(ModalModel::Membrane), &membrane(0.78));
+        assert_eq!(tables.a(ModalModel::Membrane), ratios(ModalModel::Membrane));
+
+        tables.recalc(true, ModalModel::Plate, 2.0);
+        assert_eq!(tables.a(ModalModel::Plate), &plate(2.0));
+
+        // Every other model keeps its shipped table.
+        let string = *ratios(ModalModel::String);
+        tables.recalc(true, ModalModel::String, 0.5);
+        assert_eq!(tables.a(ModalModel::String), &string);
     }
 }

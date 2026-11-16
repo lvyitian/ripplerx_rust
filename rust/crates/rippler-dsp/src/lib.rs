@@ -20,4 +20,5 @@ pub mod resonator;
 pub mod rng;
 pub mod sampler;
 pub mod utils;
+pub mod voice;
 pub mod waveguide;

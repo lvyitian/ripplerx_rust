@@ -160,12 +160,14 @@ impl Resonator {
         model: &Ratios,
         model_gain: &Ratios,
     ) {
-        if self.nmodel == ModalModel::OpenTube || self.nmodel == ModalModel::ClosedTube {
+        if self.nmodel.is_tube() {
             self.waveguide
                 .update(model[0] * freq, vel, pitch_bend, is_release);
         } else {
             for partial in self.partials.iter_mut() {
-                let idx = partial.k - 1; // clears warning when accessing model[k-1] directly
+                // The C++'s `model[k-1]`, with the index guarded against a
+                // partial number of zero.
+                let idx = partial.k().saturating_sub(1);
                 partial.update(
                     freq,
                     model[idx],
@@ -182,7 +184,7 @@ impl Resonator {
     /// Retunes the resonator for a pitch bend.
     pub fn apply_pitch_bend(&mut self, bend: f64, luts: &Luts) {
         if self.active {
-            if self.nmodel == ModalModel::OpenTube || self.nmodel == ModalModel::ClosedTube {
+            if self.nmodel.is_tube() {
                 self.waveguide.apply_pitch_bend(bend);
             } else {
                 for partial in self.partials.iter_mut().take(self.npartials) {
@@ -213,7 +215,7 @@ impl Resonator {
 
         // use active and silence to turn off strings process if not in use
         if self.active {
-            if self.nmodel == ModalModel::OpenTube || self.nmodel == ModalModel::ClosedTube {
+            if self.nmodel.is_tube() {
                 out += self.waveguide.process(input); // waveguide process
             } else {
                 for partial in self.partials.iter_mut().take(self.npartials) {
@@ -271,7 +273,7 @@ mod tests {
 
         assert_eq!(resonator.partials.len(), MAX_PARTIALS);
         for (i, partial) in resonator.partials.iter().enumerate() {
-            assert_eq!(partial.k, i + 1);
+            assert_eq!(partial.k(), i + 1);
         }
 
         assert_eq!(resonator.silence, 0);
@@ -403,6 +405,59 @@ mod tests {
 
         resonator.process(0.0);
         assert!(!resonator.active, "the resonator stayed active");
+    }
+
+    #[test]
+    fn a_partial_number_of_zero_does_not_panic() {
+        // The C++ indexes the model's ratio and gain tables with `k - 1`,
+        // which is out of range for a partial number of zero.
+        let mut resonator = Resonator::new();
+        resonator.partials[0] = Partial::new(0);
+        resonator.set_params(SRATE, &settings(ModalModel::String, 64));
+
+        resonator.update(
+            200.0,
+            0.5,
+            false,
+            1.0,
+            ratios(ModalModel::String),
+            gains(ModalModel::String),
+        );
+        resonator.activate();
+
+        assert_ne!(resonator.process(1.0), 0.0);
+    }
+
+    #[test]
+    fn the_gain_table_reaches_the_partials() {
+        // The bell model has gains of its own, so its partials are scaled
+        // differently from a model with a flat gain table.
+        let bell_gains = gains(ModalModel::Bell);
+        let flat_gains = gains(ModalModel::String);
+
+        assert_ne!(bell_gains, flat_gains);
+
+        fn output(gains: &crate::models::Ratios) -> f64 {
+            let mut resonator = Resonator::new();
+            resonator.set_params(SRATE, &settings(ModalModel::Bell, 64));
+            resonator.update(200.0, 0.5, false, 1.0, ratios(ModalModel::Bell), gains);
+            resonator.activate();
+
+            let mut sum = 0.0;
+            for n in 0..1000 {
+                sum += resonator.process((std::f64::consts::TAU * 200.0 * n as f64 / SRATE).sin());
+            }
+            sum
+        }
+
+        let with_gains = output(bell_gains);
+        let with_flat_gains = output(flat_gains);
+
+        assert!(with_gains != 0.0, "the resonator was silent");
+        assert!(
+            (with_gains - with_flat_gains).abs() > 1e-9,
+            "the gains did not reach the partials: {with_gains} against {with_flat_gains}"
+        );
     }
 
     #[test]

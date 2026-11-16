@@ -55,6 +55,16 @@ pub enum ModalModel {
     Djembe = 11,
 }
 
+impl ModalModel {
+    /// Whether the model is a tube, which is played with a waveguide rather
+    /// than with a bank of partials.
+    ///
+    /// This is the C++'s `nmodel == OpenTube || nmodel == ClosedTube` test.
+    pub fn is_tube(self) -> bool {
+        matches!(self, ModalModel::OpenTube | ModalModel::ClosedTube)
+    }
+}
+
 /// The free-free beam's roots, `bFree` in the C++.
 ///
 /// `bFree[n]` is the nth solution of `cos(pi*x) = 1/cos(pi*x)`.
@@ -926,19 +936,58 @@ mod tests {
 
     #[test]
     fn the_beam_recalculation_uses_the_free_beam_table() {
-        let recalculated = beam(0.5);
+        // The C++ recomputes the table as `sqrt(m^4 + (ratio * bFree[i])^4)`,
+        // where `m` runs from one to eight in the outer loop and the free beam
+        // table is indexed by the flat loop counter, and then divides the
+        // whole table by its first entry.
+        for ratio in [0.5, 0.78, 1.0, 2.0, 3.25] {
+            let recalculated = beam(ratio);
+
+            let mut raw = [0.0f64; MAX_PARTIALS];
+            let mut i = 0;
+            for m in 1..=8 {
+                for _n in 1..=8 {
+                    raw[i] = ((m as f64).powf(4.0) + (ratio * BFREE[i]).powf(4.0)).sqrt();
+                    i += 1;
+                }
+            }
+            let f0 = raw[0];
+
+            for (index, value) in recalculated.iter().enumerate() {
+                let expected = raw[index] / f0;
+                assert!(
+                    (value - expected).abs() < 1e-12,
+                    "ratio {ratio}, entry {index}: {value} against {expected}"
+                );
+            }
+        }
 
         // The table is normalised, so its first entry is always one.
-        assert_eq!(recalculated[0], 1.0);
+        assert_eq!(beam(0.5)[0], 1.0);
 
         // A ratio other than the shipped one gives a different table.
-        assert_ne!(recalculated[..], ratios(ModalModel::Beam)[..]);
+        assert_ne!(beam(0.5)[..], ratios(ModalModel::Beam)[..]);
+    }
 
-        // The free beam table drives the recomputation: the C++ uses
-        // `bFree[i]`, indexed by the flat loop counter.
-        let expected = ((1.0f64).powf(4.0) + (0.5 * BFREE[0]).powf(4.0)).sqrt();
-        let f0 = ((1.0f64).powf(4.0) + (0.5 * BFREE[0]).powf(4.0)).sqrt();
-        assert_eq!(recalculated[0], expected / f0);
+    #[test]
+    fn only_the_tubes_are_tube_models() {
+        assert!(ModalModel::OpenTube.is_tube());
+        assert!(ModalModel::ClosedTube.is_tube());
+
+        for model in [
+            ModalModel::String,
+            ModalModel::Beam,
+            ModalModel::Squared,
+            ModalModel::Membrane,
+            ModalModel::Plate,
+            ModalModel::Drumhead,
+            ModalModel::Marimba,
+            ModalModel::Marimba2,
+            ModalModel::Bell,
+            ModalModel::Djembe,
+        ] {
+            assert!(!model.is_tube(), "{model:?} was taken for a tube");
+        }
     }
 
     #[test]

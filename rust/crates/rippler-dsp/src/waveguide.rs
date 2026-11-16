@@ -8,7 +8,7 @@
 const TUBE_LEN: usize = 20000;
 
 /// A waveguide delay line, used by the open and closed tube models.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Waveguide {
     /// The tube's base frequency.
     pub base_freq: f64,
@@ -35,6 +35,31 @@ pub struct Waveguide {
     y1: f64,
 }
 
+impl std::fmt::Debug for Waveguide {
+    /// Prints the waveguide's settings, but not the contents of its tube.
+    ///
+    /// The tube holds twenty thousand samples, so printing them would dump a
+    /// hundred and sixty kilobytes of numbers.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Waveguide")
+            .field("base_freq", &self.base_freq)
+            .field("is_closed", &self.is_closed)
+            .field("srate", &self.srate)
+            .field("decay", &self.decay)
+            .field("radius", &self.radius)
+            .field("rel", &self.rel)
+            .field("vel_decay", &self.vel_decay)
+            .field("f_k", &self.f_k)
+            .field("read_ptr_frac", &self.read_ptr_frac)
+            .field("write_ptr", &self.write_ptr)
+            .field("tube_decay", &self.tube_decay)
+            .field("tube_len", &self.tube.len())
+            .field("y", &self.y)
+            .field("y1", &self.y1)
+            .finish()
+    }
+}
+
 impl Waveguide {
     /// Creates a waveguide with an empty tube.
     #[allow(clippy::new_without_default)]
@@ -51,7 +76,7 @@ impl Waveguide {
             read_ptr_frac: 0.0,
             write_ptr: 0,
             tube_decay: 0.0,
-            tube: Box::new([0.0; TUBE_LEN]),
+            tube: vec![0.0; TUBE_LEN].into_boxed_slice(),
             y: 0.0,
             y1: 0.0,
         }
@@ -275,6 +300,53 @@ mod tests {
             let output = waveguide.process(0.5);
             assert!(output.is_finite(), "the waveguide produced {output}");
         }
+    }
+
+    #[test]
+    fn the_wrapped_index_reads_the_slot_it_points_at() {
+        // A 1 Hz tube at 48 kHz needs 48000 samples of delay, which is more
+        // than the tube's 20000. The read pointer ends up at -28000, which
+        // the C++ reads out of bounds and the port wraps onto slot 12000.
+        let mut waveguide = tuned(1.0, 0.5);
+        assert_eq!(waveguide.read_ptr_frac, -28000.0);
+
+        // Only the slot the wrapped index points at holds anything.
+        for (index, sample) in waveguide.tube.iter_mut().enumerate() {
+            *sample = if index == 12000 { 1000.0 } else { 0.0 };
+        }
+
+        let output = waveguide.process(0.0);
+
+        // The sample is read at full weight, put through the one-pole lowpass
+        // and scaled by the tube's decay.
+        let expected = 0.5 * 1000.0 * waveguide.tube_decay;
+        assert!(
+            (output - expected).abs() < 1e-12 * expected.abs(),
+            "the waveguide read {output} instead of {expected}"
+        );
+    }
+
+    #[test]
+    fn the_debug_output_leaves_out_the_tube() {
+        let mut waveguide = tuned(1000.0, 0.5);
+        for sample in waveguide.tube.iter_mut() {
+            *sample = -98765.25;
+        }
+
+        let printed = format!("{waveguide:?}");
+
+        assert!(printed.contains("Waveguide"));
+        assert!(printed.contains("base_freq"));
+        assert!(printed.contains("tube_len"));
+        assert!(
+            !printed.contains("98765.25"),
+            "the debug output holds a sample: {printed}"
+        );
+        assert!(
+            printed.len() < 1024,
+            "the debug output is {} characters long",
+            printed.len()
+        );
     }
 
     #[test]

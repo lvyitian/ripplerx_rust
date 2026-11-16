@@ -78,13 +78,13 @@ fn calc_coefs(
 ) -> (f64, f64) {
     if tension > 1.0 {
         // Slow-start shape.
-        let t = (tension - 1.0).powi(3);
+        let t = (tension - 1.0).powf(3.0);
         let c = (((target_c + t) / t).ln() / rate).exp();
         let b = (target_b1 - mult * t) * (1.0 - c);
         (b, c)
     } else {
         // Fast-start shape (inverse exponential).
-        let t = tension.powi(3);
+        let t = tension.powf(3.0);
         let c = (-((target_c + t) / t).ln() / rate).exp();
         let b = (target_b2 + mult * t) * (1.0 - c);
         (b, c)

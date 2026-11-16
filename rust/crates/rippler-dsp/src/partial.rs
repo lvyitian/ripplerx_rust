@@ -4,6 +4,23 @@
 
 use crate::luts::Luts;
 
+/// Clamps `x` into `[lo, hi]` the way the C++'s `fmax(lo, fmin(hi, x))` does.
+///
+/// The C++'s `fmin` and `fmax` return the non-NaN operand, so a NaN is
+/// clamped to the high bound here. Rust's `clamp` propagates the NaN instead,
+/// which is not what the C++ does.
+fn clamp_cpp(lo: f64, hi: f64, x: f64) -> f64 {
+    lo.max(hi.min(x))
+}
+
+/// Clamps `x` into `[lo, hi]` the way the C++'s `fmin(hi, fmax(lo, x))` does.
+///
+/// The C++ uses this nesting for the damping and the tone, where the `fmax`
+/// is the inner call, so a NaN is clamped to the low bound here.
+fn clamp_cpp_inverted(lo: f64, hi: f64, x: f64) -> f64 {
+    hi.min(lo.max(x))
+}
+
 /// A single mode of a resonator.
 ///
 /// Port of `src/dsp/Partial.{h,cpp}`. This is a second-order bandpass with
@@ -13,7 +30,7 @@ use crate::luts::Luts;
 #[derive(Clone, Debug)]
 pub struct Partial {
     /// The partial number, counting from one.
-    pub k: usize,
+    k: usize,
     /// The sample rate the partial is tuned for.
     pub srate: f64,
 
@@ -59,6 +76,13 @@ pub struct Partial {
 }
 
 impl Partial {
+    /// The partial's number, counting from one.
+    ///
+    /// The number is fixed when the partial is created, so it is read-only.
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
     /// Creates a partial with the C++'s default values.
     pub fn new(k: usize) -> Self {
         Self {
@@ -105,7 +129,7 @@ impl Partial {
         // Normalise the velocity contribution on a logarithmic scale.
         let mut inharm_k =
             (self.inharm.ln() + vel * self.vel_inharm * -0.0001f64.ln()).exp() - 0.0001;
-        inharm_k = inharm_k.clamp(0.0, 1.0);
+        inharm_k = clamp_cpp(0.0, 1.0, inharm_k);
         inharm_k = (1.0 + inharm_k * (ratio - 1.0) * (ratio - 1.0)).sqrt();
 
         self.f_k = freq * ratio * inharm_k;
@@ -113,9 +137,9 @@ impl Partial {
         self.f_k *= pitch_bend;
 
         // Normalise the velocity contribution on a logarithmic scale.
-        let mut decay_k = (self.decay.ln() + vel * self.vel_decay * (100.0f64.ln() - 0.01f64.ln()))
-            .exp()
-            .clamp(0.01, 100.0);
+        let mut decay_k =
+            (self.decay.ln() + vel * self.vel_decay * (100.0f64.ln() - 0.01f64.ln())).exp();
+        decay_k = clamp_cpp(0.01, 100.0, decay_k);
         if is_release {
             decay_k *= self.rel;
         }
@@ -128,7 +152,7 @@ impl Partial {
         let omega = std::f64::consts::TAU * self.f_k / self.srate;
         let alpha = std::f64::consts::TAU / self.srate;
 
-        let damp_base = (self.damp + self.vel_damp * 2.0 * vel).clamp(-1.0, 1.0);
+        let damp_base = clamp_cpp_inverted(-1.0, 1.0, self.damp + self.vel_damp * 2.0 * vel);
         let damp_k = if damp_base <= 0.0 {
             (freq / self.f_k).powf(damp_base * 2.0)
         } else {
@@ -137,7 +161,7 @@ impl Partial {
 
         decay_k /= damp_k;
 
-        let tone_base = (self.tone + self.vel_tone * 2.0 * vel).clamp(-1.0, 1.0);
+        let tone_base = clamp_cpp_inverted(-1.0, 1.0, self.tone + self.vel_tone * 2.0 * vel);
         let tone_gain = if tone_base <= 0.0 {
             (self.f_k / freq).powf(tone_base * 12.0 / 6.0)
         } else {
@@ -146,7 +170,7 @@ impl Partial {
 
         let mut amp_k = (std::f64::consts::PI
             * self.k as f64
-            * (self.hit + self.vel_hit * vel / 2.0).clamp(0.02, 0.5))
+            * clamp_cpp(0.02, 0.5, self.hit + self.vel_hit * vel / 2.0))
         .sin()
         .abs();
         amp_k *= 35.0;
@@ -192,6 +216,11 @@ impl Partial {
     }
 
     /// Scales the partial's output by `gain`.
+    ///
+    /// The coefficients are scaled in place, which is only correct because
+    /// [`Partial::update`] resets `b0` and `b2` before they are scaled
+    /// again. Calling this twice without an update in between squares the
+    /// gain.
     pub fn apply_gain(&mut self, gain: f64) {
         self.b0 *= gain;
         self.b2 *= gain;
@@ -226,7 +255,7 @@ mod tests {
     fn a_new_partial_has_the_cpp_defaults() {
         let partial = Partial::new(3);
 
-        assert_eq!(partial.k, 3);
+        assert_eq!(partial.k(), 3);
         assert_eq!(partial.srate, 0.0);
         assert_eq!(partial.decay, 0.0);
         assert_eq!(partial.damp, 0.0);
@@ -278,21 +307,34 @@ mod tests {
 
     #[test]
     fn the_inharmonicity_raises_the_partial_frequency() {
-        let mut partial = tuned(2);
-        partial.inharm = 1.0;
-        partial.update(200.0, 2.0, 64.0, 0.5, 1.0, false);
-
-        // The inharmonicity pushes the partial above the plain frequency
-        // ratio, by the square root of `1 + inharm_k * (ratio - 1)^2`.
-        assert!(partial.f_k > 200.0 * 2.0);
-
-        let inharm_k = ((1.0f64).ln() + 0.5 * 0.0 * -0.0001f64.ln()).exp() - 0.0001;
-        let expected = 200.0 * 2.0 * (1.0 + inharm_k * (2.0 - 1.0) * (2.0 - 1.0)).sqrt();
+        // Without any inharmonicity the partial sits at the plain frequency
+        // ratio.
+        let mut plain = tuned(2);
+        plain.inharm = 0.0;
+        plain.update(200.0, 2.0, 64.0, 0.5, 1.0, false);
         assert!(
-            (partial.f_k - expected).abs() < 1e-9,
+            (plain.f_k - 200.0 * 2.0).abs() < 1e-9,
             "f_k was {}",
-            partial.f_k
+            plain.f_k
         );
+
+        // Raising the inharmonicity raises the partial above that frequency.
+        let mut previous = plain.f_k;
+        for inharm in [0.001, 0.01, 0.1, 0.5, 1.0] {
+            let mut partial = tuned(2);
+            partial.inharm = inharm;
+            partial.update(200.0, 2.0, 64.0, 0.5, 1.0, false);
+
+            assert!(
+                partial.f_k > plain.f_k,
+                "inharmonicity {inharm} did not raise the frequency"
+            );
+            assert!(
+                partial.f_k > previous,
+                "inharmonicity {inharm} did not raise the frequency further"
+            );
+            previous = partial.f_k;
+        }
     }
 
     #[test]
@@ -340,5 +382,53 @@ mod tests {
 
         assert!((partial.f_k - base * 1.5).abs() < 1e-9);
         assert!(!partial.out_of_range);
+    }
+
+    #[test]
+    fn a_pitch_bend_out_of_range_silences_the_partial() {
+        let luts = Luts::new(SRATE);
+
+        let mut partial = tuned(1);
+        partial.update(200.0, 1.0, 64.0, 0.5, 1.0, false);
+        assert!(!partial.out_of_range);
+
+        // A bend of two hundred takes the partial well above the top of the
+        // audible range.
+        partial.apply_pitch_bend(200.0, &luts);
+        assert!(partial.out_of_range);
+        assert_eq!(partial.process(1.0), 0.0);
+
+        // And a bend of a thousandth takes it below the bottom.
+        let mut low = tuned(1);
+        low.update(200.0, 1.0, 64.0, 0.5, 1.0, false);
+        low.apply_pitch_bend(0.001, &luts);
+        assert!(low.out_of_range);
+        assert_eq!(low.process(1.0), 0.0);
+    }
+
+    #[test]
+    fn the_cpp_clamp_clamps_a_nan_to_the_high_bound() {
+        // The C++'s `fmin` and `fmax` return the non-NaN operand, so a NaN
+        // is clamped to the high bound. Rust's `clamp` propagates it instead.
+        assert_eq!(clamp_cpp(0.0, 1.0, f64::NAN), 1.0);
+        assert_eq!(clamp_cpp(0.01, 100.0, f64::NAN), 100.0);
+        assert_eq!(clamp_cpp(0.02, 0.5, f64::NAN), 0.5);
+
+        // The other nesting, which the C++ uses for the damping and the tone,
+        // clamps a NaN to the low bound.
+        assert_eq!(clamp_cpp_inverted(-1.0, 1.0, f64::NAN), -1.0);
+    }
+
+    #[test]
+    fn the_cpp_clamp_agrees_with_the_rust_clamp() {
+        for value in [-2.0, -0.5, 0.0, 0.25, 0.5, 1.0, 2.0] {
+            assert_eq!(clamp_cpp(0.0, 1.0, value), value.clamp(0.0, 1.0));
+            assert_eq!(clamp_cpp_inverted(-1.0, 1.0, value), value.clamp(-1.0, 1.0));
+        }
+
+        assert_eq!(clamp_cpp(0.0, 1.0, -1.0), 0.0);
+        assert_eq!(clamp_cpp(0.0, 1.0, 2.0), 1.0);
+        assert_eq!(clamp_cpp_inverted(-1.0, 1.0, -2.0), -1.0);
+        assert_eq!(clamp_cpp_inverted(-1.0, 1.0, 2.0), 1.0);
     }
 }

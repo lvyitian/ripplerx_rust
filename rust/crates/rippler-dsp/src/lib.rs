@@ -3,5 +3,6 @@
 //! This crate has no dependency on any plugin framework. Everything here is
 //! portable, testable in isolation, and free of allocation on the audio path.
 
+pub mod filter;
 pub mod lut;
 pub mod rng;

@@ -207,3 +207,58 @@ impl RipplerX {
         self.midi.bend.total = (BEND_GLIDE_MS * 0.001 * self.srate) as i64;
     }
 }
+
+impl ClapPlugin for RipplerX {
+    /// The bundle identifier of the JUCE build.
+    const CLAP_ID: &'static str = identity::CLAP_ID;
+
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("A physically modelled modal synthesiser with two resonators");
+
+    const CLAP_MANUAL_URL: Option<&'static str> = Some("https://github.com/tiagolr/ripplerx");
+
+    const CLAP_SUPPORT_URL: Option<&'static str> = Some("https://github.com/tiagolr/ripplerx");
+
+    /// The plugin is an instrument with a stereo output.
+    const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Stereo];
+}
+
+impl Vst3Plugin for RipplerX {
+    /// The class ID of the JUCE build, in its canonical order.
+    ///
+    /// The JUCE build's class ID is not the same on every platform: the
+    /// byte order of its first two words depends on the platform JUCE was
+    /// compiled for, and it is not the byte swap nice-plug does on Windows.
+    /// The platform's own class ID is therefore given in
+    /// [`PLATFORM_VST3_CLASS_ID`][Self::PLATFORM_VST3_CLASS_ID].
+    const VST3_CLASS_ID: [u8; 16] = identity::VST3_CLASS_ID_POSIX;
+
+    /// The class ID of the JUCE build on this platform.
+    ///
+    /// This is the value the host sees: the VST3 factory reports it as the
+    /// plugin's class ID, and it is what the module information file holds.
+    const PLATFORM_VST3_CLASS_ID: [u8; 16] = identity::VST3_CLASS_ID;
+
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument];
+}
+
+nice_export_clap!(RipplerX);
+nice_export_vst3!(RipplerX);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_class_id_of_this_platform_is_the_juce_builds_class_id() {
+        assert_eq!(
+            <RipplerX as Vst3Plugin>::PLATFORM_VST3_CLASS_ID,
+            identity::VST3_CLASS_ID
+        );
+    }
+
+    #[test]
+    fn the_clap_identifier_is_the_juce_builds_identifier() {
+        assert_eq!(<RipplerX as ClapPlugin>::CLAP_ID, "com.tilr.ripplerx");
+    }
+}

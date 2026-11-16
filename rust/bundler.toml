@@ -1,0 +1,8 @@
+# The names of the plugin bundles.
+#
+# The JUCE build's bundles are called "RipplerX", so the bundles have to be
+# called that as well, or a host that has the JUCE build installed will
+# show the plugin twice.
+
+[rippler-plugin]
+name = "RipplerX"

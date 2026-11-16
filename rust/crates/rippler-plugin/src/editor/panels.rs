@@ -128,6 +128,8 @@ pub(crate) struct Panels<'a> {
     pub polyphony: &'a Arc<AtomicUsize>,
     /// Whether the velocity edit mode is on.
     pub velocity: &'a Arc<AtomicBool>,
+    /// A user sample that the editor decoded, waiting for the audio thread.
+    pub user_sample: &'a Arc<Mutex<Option<crate::params::UserSample>>>,
 }
 
 impl<'a> Panels<'a> {
@@ -447,8 +449,28 @@ pub(crate) fn mallet_section(ui: &mut Ui, panels: &Panels) {
     let is_impulse = mallet == MalletType::Impulse as usize;
     let is_sample = mallet >= MalletType::UserFile as usize;
 
+    // The label of the section opens the mallet menu, the way the JUCE
+    // editor's does.
     ui.horizontal(|ui| {
-        section_label(ui, &panels.theme, "MALLET");
+        let response = ui.add(
+            egui::Button::new(
+                RichText::new("MALLET")
+                    .color(panels.theme.neutral_light)
+                    .size(16.0),
+            )
+            .fill(panels.theme.background),
+        );
+        crate::editor::menus::mallet_menu(ui, panels, &response);
+
+        let name = MalletType::variants()
+            .get(mallet)
+            .copied()
+            .unwrap_or("Impulse");
+        ui.label(
+            RichText::new(name)
+                .color(panels.theme.neutral_light)
+                .size(11.0),
+        );
     });
 
     Grid::new("mallet-knobs")
@@ -803,8 +825,7 @@ const POLYPHONIES: [usize; 5] = [1, 4, 8, 12, 16];
 ///
 /// The JUCE editor's top bar has the logo, the theme button, the velocity
 /// button, the polyphony menu, the patch menu and the settings button.
-pub(crate) fn top_bar(ui: &mut Ui, panels: &Panels) -> Option<TopBarAction> {
-    let mut action = None;
+pub(crate) fn top_bar(ui: &mut Ui, panels: &Panels) {
     ui.horizontal(|ui| {
         // The logo.
         let logo = if panels.theme.is_dark() {
@@ -868,27 +889,11 @@ pub(crate) fn top_bar(ui: &mut Ui, panels: &Panels) -> Option<TopBarAction> {
 
         // The patch menu and the settings button.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-            let patch = ui.add(egui::Button::new("Patch"));
             let gear = gear_button(ui, panels);
-            if patch.clicked() {
-                action = Some(TopBarAction::Patch);
-            }
-            if gear.clicked() {
-                action = Some(TopBarAction::Settings);
-            }
+            crate::editor::menus::settings_menu(ui, panels, &gear);
+            crate::editor::menus::preset_menu(ui, panels);
         });
     });
-
-    action
-}
-
-/// What the user asked for in the top bar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TopBarAction {
-    /// The patch menu was asked for.
-    Patch,
-    /// The settings menu was asked for.
-    Settings,
 }
 
 /// Turns the theme over.
@@ -1001,6 +1006,7 @@ mod tests {
         let settings = Arc::new(Mutex::new(Settings::default()));
         let polyphony = Arc::new(AtomicUsize::new(8));
         let velocity = Arc::new(AtomicBool::new(false));
+        let user_sample = Arc::new(Mutex::new(None));
 
         let output = context.run_ui(
             egui::RawInput {
@@ -1012,7 +1018,7 @@ mod tests {
             },
             |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
-                    let params = Params::new(&map, &setter);
+                    let params = Params::new(&parameters, &map, &setter);
                     let panels = Panels {
                         params: &params,
                         theme: Theme::LIGHT,
@@ -1022,6 +1028,7 @@ mod tests {
                         settings: &settings,
                         polyphony: &polyphony,
                         velocity: &velocity,
+                        user_sample: &user_sample,
                     };
                     draw(ui, &panels);
                 });

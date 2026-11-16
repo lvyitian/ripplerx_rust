@@ -12,6 +12,7 @@
 //! window is open.
 
 pub mod knob;
+pub mod menus;
 pub mod meter;
 pub mod panels;
 pub mod pitch;
@@ -31,10 +32,12 @@ use nice_plug_core::params::Params as ParamsTrait;
 use nice_plug_core::params::internals::ParamPtr;
 use nice_plug_egui::baseview::HandlerError;
 use nice_plug_egui::{Frame, NiceEguiApp};
+use rippler_params::apply_parameter;
 use rippler_params::params::RipplerParams;
 
 use crate::editor::settings::Settings;
 use crate::editor::theme::Theme;
+use crate::params::UserSample;
 
 /// The size of the editor, in points.
 ///
@@ -127,6 +130,20 @@ impl Parameters {
         // SAFETY: see `normalized`.
         unsafe { pointer.preview_normalized(plain) }
     }
+
+    /// The plain value of every parameter, by its identifier.
+    ///
+    /// The values are the ones the legacy state holds: a float parameter its
+    /// value, a choice parameter its index and a boolean `0.0` or `1.0`.
+    pub fn values(&self) -> std::collections::BTreeMap<String, f64> {
+        let mut values = std::collections::BTreeMap::new();
+        for (id, pointer) in &self.map {
+            // SAFETY: see `normalized`.
+            let value = unsafe { pointer.modulated_plain_value() };
+            values.insert(id.clone(), value as f64);
+        }
+        values
+    }
 }
 
 /// The plugin's parameters and the setter that writes them.
@@ -134,6 +151,8 @@ impl Parameters {
 /// The setter is the one the plugin's context hands to the editor, so every
 /// change the editor makes is recorded by the host as an automation point.
 pub(crate) struct Params<'a> {
+    /// Every parameter of the plugin.
+    all: &'a RipplerParams,
     /// The parameters.
     parameters: &'a Parameters,
     /// The setter.
@@ -142,8 +161,29 @@ pub(crate) struct Params<'a> {
 
 impl<'a> Params<'a> {
     /// Binds the parameters to a setter.
-    pub fn new(parameters: &'a Parameters, setter: &'a ParamSetter<'a>) -> Self {
-        Self { parameters, setter }
+    pub fn new(
+        all: &'a RipplerParams,
+        parameters: &'a Parameters,
+        setter: &'a ParamSetter<'a>,
+    ) -> Self {
+        Self {
+            all,
+            parameters,
+            setter,
+        }
+    }
+
+    /// Sets a parameter to a legacy plain value.
+    ///
+    /// The value is a legacy one: a float parameter's value, a choice
+    /// parameter's index and a boolean's `0.0` or `1.0`. The conversion is
+    /// the one of `rippler_params`, so the identifiers and the values are
+    /// the ones of the legacy state.
+    pub fn set_legacy(&self, id: &str, value: f64) -> bool {
+        self.begin(id);
+        let set = apply_parameter!(self.all, self.setter, id, value);
+        self.end(id);
+        set
     }
 
     /// The normalised value of a parameter.
@@ -164,6 +204,11 @@ impl<'a> Params<'a> {
     /// The normalised value of a plain value.
     pub fn preview_normalized(&self, id: &str, plain: f32) -> f32 {
         self.parameters.preview_normalized(id, plain)
+    }
+
+    /// The plain value of every parameter, by its identifier.
+    pub fn values(&self) -> std::collections::BTreeMap<String, f64> {
+        self.parameters.values()
     }
 
     /// Tells the host that a parameter is about to change.
@@ -240,17 +285,20 @@ pub struct EditorState {
     /// it: it is a mode of the editor, not a setting of the plugin. It is
     /// an atomic, because the editor changes it while it draws itself.
     velocity_mode: Arc<AtomicBool>,
+    /// A user sample that the editor decoded, waiting for the audio thread.
+    user_sample: Arc<Mutex<Option<UserSample>>>,
     /// The meter's value, shared with the audio thread.
     meter: Arc<AtomicF32>,
 }
 
 impl EditorState {
     /// Builds the state of an editor.
-    pub fn new(
+    pub(crate) fn new(
         params: Arc<RipplerParams>,
         settings: Arc<Mutex<Settings>>,
         polyphony: Arc<AtomicUsize>,
         meter: Arc<AtomicF32>,
+        user_sample: Arc<Mutex<Option<UserSample>>>,
     ) -> Self {
         Self {
             params,
@@ -258,49 +306,44 @@ impl EditorState {
             polyphony,
             velocity_mode: Arc::new(AtomicBool::new(false)),
             meter,
+            user_sample,
         }
     }
 
+    /// A user sample that the editor decoded, waiting for the audio thread.
+    pub(crate) fn user_sample(&self) -> &Arc<Mutex<Option<UserSample>>> {
+        &self.user_sample
+    }
+
     /// The plugin's parameters.
-    pub fn params(&self) -> &Arc<RipplerParams> {
+    pub(crate) fn params(&self) -> &Arc<RipplerParams> {
         &self.params
     }
 
     /// The settings that are not plugin parameters.
-    pub fn settings(&self) -> &Arc<Mutex<Settings>> {
+    pub(crate) fn settings(&self) -> &Arc<Mutex<Settings>> {
         &self.settings
     }
 
     /// The number of voices the plugin plays.
-    pub fn polyphony(&self) -> &Arc<AtomicUsize> {
+    pub(crate) fn polyphony(&self) -> &Arc<AtomicUsize> {
         &self.polyphony
     }
 
     /// The meter's value, shared with the audio thread.
-    pub fn meter(&self) -> &Arc<AtomicF32> {
+    pub(crate) fn meter(&self) -> &Arc<AtomicF32> {
         &self.meter
     }
 
     /// Whether the velocity edit mode is on.
-    pub fn velocity_mode(&self) -> &Arc<AtomicBool> {
+    pub(crate) fn velocity_mode(&self) -> &Arc<AtomicBool> {
         &self.velocity_mode
     }
 
-    /// Turns the velocity edit mode on or off.
-    pub fn set_velocity_mode(&self, on: bool) {
-        self.velocity_mode.store(on, Ordering::Relaxed);
-    }
-
     /// The theme the editor is drawn in.
-    pub fn theme(&self) -> Theme {
+    pub(crate) fn theme(&self) -> Theme {
         let settings = self.settings.lock().expect("the settings are not poisoned");
         Theme::new(settings.dark_theme)
-    }
-
-    /// The scale of the user interface.
-    pub fn ui_scale(&self) -> f32 {
-        let settings = self.settings.lock().expect("the settings are not poisoned");
-        settings.ui_scale
     }
 }
 
@@ -368,7 +411,7 @@ impl NiceEguiApp for RipplerEditor {
         };
 
         let setter = open.gui.param_setter();
-        let params = Params::new(&open.parameters, &setter);
+        let params = Params::new(self.state.params(), &open.parameters, &setter);
 
         let panels = panels::Panels {
             params: &params,
@@ -379,6 +422,7 @@ impl NiceEguiApp for RipplerEditor {
             settings: self.state.settings(),
             polyphony: self.state.polyphony(),
             velocity: self.state.velocity_mode(),
+            user_sample: self.state.user_sample(),
         };
 
         panels::top_bar(ui, &panels);
@@ -413,6 +457,7 @@ mod tests {
             Arc::new(Mutex::new(settings)),
             Arc::new(AtomicUsize::new(DEFAULT_POLYPHONY)),
             Arc::new(AtomicF32::new(0.0)),
+            Arc::new(Mutex::new(None)),
         )
     }
 
@@ -431,7 +476,7 @@ mod tests {
     fn the_velocity_mode_is_off_until_it_is_turned_on() {
         let state = state();
         assert!(!state.velocity_mode().load(Ordering::Relaxed));
-        state.set_velocity_mode(true);
+        state.velocity_mode().store(true, Ordering::Relaxed);
         assert!(state.velocity_mode().load(Ordering::Relaxed));
     }
 }

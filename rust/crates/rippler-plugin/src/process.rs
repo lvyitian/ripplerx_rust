@@ -207,6 +207,11 @@ impl RipplerX {
     /// The events of the block have to be queued with
     /// [`RipplerX::queue_event`] before this is called.
     pub(crate) fn process_block(&mut self, buffer: &mut Buffer) {
+        // A user sample that the editor decoded is moved into the sampler
+        // before anything else, so that it is there when the mallet type
+        // changes.
+        self.install_user_sample();
+
         let num_samples = buffer.samples();
         let block = BlockParams::read(&self.params, self.noise_mix_range, self.noise_res_range);
 

@@ -17,6 +17,7 @@ mts-client-rs = "0.1.0"
 nice-plug = { version = "0.4", default-features = false, features = ["editor", "vst3"] }
 nice-plug-core = { version = "0.4", default-features = false, features = ["editor"] }
 nice-plug-egui = "0.6"
+rfd = "0.18"
 rippler-dsp = { workspace = true }
 rippler-params = { workspace = true }
 serde = { version = "1", features = ["derive"] }

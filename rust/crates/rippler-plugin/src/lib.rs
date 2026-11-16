@@ -31,7 +31,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use crate::editor::{EDITOR_SIZE, EditorState, RipplerEditor};
-use crate::params::{MALLET_TYPE_COUNT, ParamState, PreparedSample, prepare_internal_samples};
+use crate::params::{
+    MALLET_TYPE_COUNT, ParamState, PreparedSample, UserSample, prepare_internal_samples,
+};
 use crate::process::{MIDI_QUEUE_CAPACITY, MidiState};
 
 /// The number of voices the plugin has, `globals::MAX_POLYPHONY`.
@@ -113,6 +115,8 @@ pub struct RipplerX {
     editor: Option<RipplerEditor>,
     /// The meter's value, shared with the audio thread.
     meter: Arc<AtomicF32>,
+    /// A user sample that the editor decoded, waiting for the audio thread.
+    user_sample: Arc<Mutex<Option<UserSample>>>,
 }
 
 impl Default for RipplerX {
@@ -133,14 +137,21 @@ impl Default for RipplerX {
                 .unwrap_or(DEFAULT_POLYPHONY),
         ));
         let meter = Arc::new(AtomicF32::new(0.0));
+        let user_sample = Arc::new(Mutex::new(None));
 
-        let editor_state = EguiEditorState::from_size(EDITOR_SIZE, 1.0);
+        // The editor opens at the scale the user chose last.
+        let ui_scale = settings
+            .lock()
+            .map(|settings| settings.ui_scale)
+            .unwrap_or(1.0);
+        let editor_state = EguiEditorState::from_size(EDITOR_SIZE, ui_scale);
         let repaint_notifier = RepaintNotifier::new();
         let editor = RipplerEditor::new(EditorState::new(
             params.clone(),
             settings.clone(),
             polyphony.clone(),
             meter.clone(),
+            user_sample.clone(),
         ));
 
         Self {
@@ -170,6 +181,7 @@ impl Default for RipplerX {
             repaint_notifier,
             editor: Some(editor),
             meter,
+            user_sample,
         }
     }
 }

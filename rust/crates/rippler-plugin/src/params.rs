@@ -39,6 +39,18 @@ pub fn default_ratio(model: ModalModel) -> f64 {
     }
 }
 
+/// A user sample, decoded by the editor.
+///
+/// The editor decodes the file the user picked, because the audio thread
+/// may not decode anything, and hands the waveform to the plugin, which
+/// moves it into the sampler at the beginning of the next block.
+pub(crate) struct UserSample {
+    /// The waveform of the sample.
+    pub waveform: Vec<f64>,
+    /// The sample rate of the waveform.
+    pub sample_rate: f64,
+}
+
 /// A bundled sample, decoded ahead of time.
 ///
 /// The plugin decodes every bundled sample when it is activated, so that a
@@ -209,6 +221,38 @@ impl RipplerX {
         }
 
         self.params_state.applied = Some(*block);
+    }
+
+    /// Moves a user sample into the sampler.
+    ///
+    /// The editor decodes the file the user picked, because the audio thread
+    /// may not decode anything, and leaves the waveform here. The audio
+    /// thread picks it up at the beginning of the next block.
+    pub(crate) fn install_user_sample(&mut self) {
+        let Ok(mut slot) = self.user_sample.try_lock() else {
+            // The editor is writing a sample at this very moment, so the
+            // next block will pick it up.
+            return;
+        };
+        let Some(sample) = slot.take() else {
+            return;
+        };
+        drop(slot);
+
+        // The waveform that was in the sampler goes back into the cache, if
+        // it was one of the bundled samples.
+        let sample_rate = self.sampler.wavesrate;
+        let previous = std::mem::replace(&mut self.sampler.waveform, sample.waveform);
+        self.sampler.wavesrate = sample.sample_rate;
+        self.sampler.is_user_file = true;
+
+        if let Some(previous_type) = self.loaded_sample {
+            self.internal_samples[previous_type as usize] = Some(PreparedSample {
+                waveform: previous,
+                sample_rate,
+            });
+        }
+        self.loaded_sample = None;
     }
 
     /// Moves a prepared waveform into the sampler.

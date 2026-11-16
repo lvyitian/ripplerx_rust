@@ -188,9 +188,7 @@ pub fn to_parameter_values(patch: &LegacyPatch) -> BTreeMap<String, f64> {
         };
 
         let value = match (spec.kind, spec.step) {
-            (ParameterKind::Float, Some(step)) => {
-                snap_to_step(value, spec.min, spec.max, step)
-            }
+            (ParameterKind::Float, Some(step)) => snap_to_step(value, spec.min, spec.max, step),
             _ => value,
         };
 
@@ -246,8 +244,9 @@ mod tests {
 
     #[test]
     fn an_absent_parameter_is_simply_missing() {
-        let patch = read_legacy_patch("<PARAMETERS><PARAM id=\"a_decay\" value=\"1.0\"/></PARAMETERS>")
-            .expect("the patch is a parameters tree");
+        let patch =
+            read_legacy_patch("<PARAMETERS><PARAM id=\"a_decay\" value=\"1.0\"/></PARAMETERS>")
+                .expect("the patch is a parameters tree");
         assert_eq!(patch.values.len(), 1);
         assert!(!patch.values.contains_key("b_decay"));
         assert!(!patch.values.contains_key("mallet_type"));
@@ -284,8 +283,9 @@ mod tests {
 
     #[test]
     fn a_cut_below_twenty_is_left_alone() {
-        let patch = read_legacy_patch("<PARAMETERS><PARAM id=\"a_cut\" value=\"-0.5\"/></PARAMETERS>")
-            .expect("the patch is a parameters tree");
+        let patch =
+            read_legacy_patch("<PARAMETERS><PARAM id=\"a_cut\" value=\"-0.5\"/></PARAMETERS>")
+                .expect("the patch is a parameters tree");
         assert_eq!(patch.values["a_cut"], -0.5);
     }
 

@@ -15,7 +15,6 @@
 //! holds its plain value, a choice parameter its index and a boolean `0.0` or
 //! `1.0`.
 
-use nice_plug_core::params::enums::Enum;
 use nice_plug_core::params::range::IntRange;
 use nice_plug_core::params::{BoolParam, EnumParam, FloatParam, IntParam, Params};
 use rippler_dsp::mallet::MalletType;
@@ -1293,8 +1292,9 @@ impl Default for RipplerParams {
 mod tests {
     use std::collections::BTreeSet;
 
-    use nice_plug_core::params::range::FloatRange;
     use nice_plug_core::params::Param;
+    use nice_plug_core::params::enums::Enum;
+    use nice_plug_core::params::range::FloatRange;
 
     use super::*;
 
@@ -1542,13 +1542,22 @@ mod tests {
                 "mallet_type",
                 params.mallet.mallet_type.default_plain_value().to_index() as f64,
             ),
-            ("mallet_pitch", params.mallet.mallet_pitch.default_plain_value() as f64),
+            (
+                "mallet_pitch",
+                params.mallet.mallet_pitch.default_plain_value() as f64,
+            ),
             (
                 "mallet_filter",
                 params.mallet.mallet_filter.default_plain_value() as f64,
             ),
-            ("mallet_mix", params.mallet.mallet_mix.default_plain_value() as f64),
-            ("mallet_res", params.mallet.mallet_res.default_plain_value() as f64),
+            (
+                "mallet_mix",
+                params.mallet.mallet_mix.default_plain_value() as f64,
+            ),
+            (
+                "mallet_res",
+                params.mallet.mallet_res.default_plain_value() as f64,
+            ),
             (
                 "mallet_stiff",
                 params.mallet.mallet_stiff.default_plain_value() as f64,
@@ -1567,19 +1576,56 @@ mod tests {
             ),
             (
                 "a_partials",
-                params.resonator_a.a_partials.default_plain_value().to_index() as f64,
+                params
+                    .resonator_a
+                    .a_partials
+                    .default_plain_value()
+                    .to_index() as f64,
             ),
-            ("a_decay", params.resonator_a.a_decay.default_plain_value() as f64),
-            ("a_damp", params.resonator_a.a_damp.default_plain_value() as f64),
-            ("a_tone", params.resonator_a.a_tone.default_plain_value() as f64),
-            ("a_hit", params.resonator_a.a_hit.default_plain_value() as f64),
-            ("a_rel", params.resonator_a.a_rel.default_plain_value() as f64),
-            ("a_inharm", params.resonator_a.a_inharm.default_plain_value() as f64),
-            ("a_ratio", params.resonator_a.a_ratio.default_plain_value() as f64),
-            ("a_cut", params.resonator_a.a_cut.default_plain_value() as f64),
-            ("a_radius", params.resonator_a.a_radius.default_plain_value() as f64),
-            ("a_coarse", params.resonator_a.a_coarse.default_plain_value() as f64),
-            ("a_fine", params.resonator_a.a_fine.default_plain_value() as f64),
+            (
+                "a_decay",
+                params.resonator_a.a_decay.default_plain_value() as f64,
+            ),
+            (
+                "a_damp",
+                params.resonator_a.a_damp.default_plain_value() as f64,
+            ),
+            (
+                "a_tone",
+                params.resonator_a.a_tone.default_plain_value() as f64,
+            ),
+            (
+                "a_hit",
+                params.resonator_a.a_hit.default_plain_value() as f64,
+            ),
+            (
+                "a_rel",
+                params.resonator_a.a_rel.default_plain_value() as f64,
+            ),
+            (
+                "a_inharm",
+                params.resonator_a.a_inharm.default_plain_value() as f64,
+            ),
+            (
+                "a_ratio",
+                params.resonator_a.a_ratio.default_plain_value() as f64,
+            ),
+            (
+                "a_cut",
+                params.resonator_a.a_cut.default_plain_value() as f64,
+            ),
+            (
+                "a_radius",
+                params.resonator_a.a_radius.default_plain_value() as f64,
+            ),
+            (
+                "a_coarse",
+                params.resonator_a.a_coarse.default_plain_value() as f64,
+            ),
+            (
+                "a_fine",
+                params.resonator_a.a_fine.default_plain_value() as f64,
+            ),
             (
                 "b_on",
                 params.resonator_b.b_on.default_plain_value() as u8 as f64,
@@ -1590,25 +1636,75 @@ mod tests {
             ),
             (
                 "b_partials",
-                params.resonator_b.b_partials.default_plain_value().to_index() as f64,
+                params
+                    .resonator_b
+                    .b_partials
+                    .default_plain_value()
+                    .to_index() as f64,
             ),
-            ("b_decay", params.resonator_b.b_decay.default_plain_value() as f64),
-            ("b_damp", params.resonator_b.b_damp.default_plain_value() as f64),
-            ("b_tone", params.resonator_b.b_tone.default_plain_value() as f64),
-            ("b_hit", params.resonator_b.b_hit.default_plain_value() as f64),
-            ("b_rel", params.resonator_b.b_rel.default_plain_value() as f64),
-            ("b_inharm", params.resonator_b.b_inharm.default_plain_value() as f64),
-            ("b_ratio", params.resonator_b.b_ratio.default_plain_value() as f64),
-            ("b_cut", params.resonator_b.b_cut.default_plain_value() as f64),
-            ("b_radius", params.resonator_b.b_radius.default_plain_value() as f64),
-            ("b_coarse", params.resonator_b.b_coarse.default_plain_value() as f64),
-            ("b_fine", params.resonator_b.b_fine.default_plain_value() as f64),
-            ("noise_osc", params.noise.noise_osc.default_plain_value() as f64),
-            ("noise_mix", params.noise.noise_mix.default_plain_value() as f64),
-            ("noise_res", params.noise.noise_res.default_plain_value() as f64),
+            (
+                "b_decay",
+                params.resonator_b.b_decay.default_plain_value() as f64,
+            ),
+            (
+                "b_damp",
+                params.resonator_b.b_damp.default_plain_value() as f64,
+            ),
+            (
+                "b_tone",
+                params.resonator_b.b_tone.default_plain_value() as f64,
+            ),
+            (
+                "b_hit",
+                params.resonator_b.b_hit.default_plain_value() as f64,
+            ),
+            (
+                "b_rel",
+                params.resonator_b.b_rel.default_plain_value() as f64,
+            ),
+            (
+                "b_inharm",
+                params.resonator_b.b_inharm.default_plain_value() as f64,
+            ),
+            (
+                "b_ratio",
+                params.resonator_b.b_ratio.default_plain_value() as f64,
+            ),
+            (
+                "b_cut",
+                params.resonator_b.b_cut.default_plain_value() as f64,
+            ),
+            (
+                "b_radius",
+                params.resonator_b.b_radius.default_plain_value() as f64,
+            ),
+            (
+                "b_coarse",
+                params.resonator_b.b_coarse.default_plain_value() as f64,
+            ),
+            (
+                "b_fine",
+                params.resonator_b.b_fine.default_plain_value() as f64,
+            ),
+            (
+                "noise_osc",
+                params.noise.noise_osc.default_plain_value() as f64,
+            ),
+            (
+                "noise_mix",
+                params.noise.noise_mix.default_plain_value() as f64,
+            ),
+            (
+                "noise_res",
+                params.noise.noise_res.default_plain_value() as f64,
+            ),
             (
                 "noise_filter_mode",
-                params.noise.noise_filter_mode.default_plain_value().to_index() as f64,
+                params
+                    .noise
+                    .noise_filter_mode
+                    .default_plain_value()
+                    .to_index() as f64,
             ),
             (
                 "noise_filter_freq",
@@ -1618,10 +1714,22 @@ mod tests {
                 "noise_filter_q",
                 params.noise.noise_filter_q.default_plain_value() as f64,
             ),
-            ("noise_att", params.noise.noise_att.default_plain_value() as f64),
-            ("noise_dec", params.noise.noise_dec.default_plain_value() as f64),
-            ("noise_sus", params.noise.noise_sus.default_plain_value() as f64),
-            ("noise_rel", params.noise.noise_rel.default_plain_value() as f64),
+            (
+                "noise_att",
+                params.noise.noise_att.default_plain_value() as f64,
+            ),
+            (
+                "noise_dec",
+                params.noise.noise_dec.default_plain_value() as f64,
+            ),
+            (
+                "noise_sus",
+                params.noise.noise_sus.default_plain_value() as f64,
+            ),
+            (
+                "noise_rel",
+                params.noise.noise_rel.default_plain_value() as f64,
+            ),
             (
                 "noise_att_ten",
                 params.noise.noise_att_ten.default_plain_value() as f64,
@@ -1718,7 +1826,10 @@ mod tests {
                 "vel_b_tone",
                 params.velocity.vel_b_tone.default_plain_value() as f64,
             ),
-            ("couple", params.couple.default_plain_value().to_index() as f64),
+            (
+                "couple",
+                params.couple.default_plain_value().to_index() as f64,
+            ),
             ("ab_mix", params.ab_mix.default_plain_value() as f64),
             ("ab_split", params.ab_split.default_plain_value() as f64),
             ("gain", params.gain.default_plain_value() as f64),

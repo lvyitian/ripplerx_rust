@@ -186,7 +186,10 @@ impl nice_plug_core::params::enums::Enum for MalletType {
     }
 
     fn from_index(index: usize) -> Self {
-        MalletType::ALL.get(index).copied().unwrap_or(MalletType::Impulse)
+        MalletType::ALL
+            .get(index)
+            .copied()
+            .unwrap_or(MalletType::Impulse)
     }
 }
 

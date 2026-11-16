@@ -13,4 +13,5 @@
 pub mod enums;
 pub mod legacy;
 pub mod params;
+pub mod patch;
 pub mod ranges;

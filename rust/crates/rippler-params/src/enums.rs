@@ -139,8 +139,14 @@ mod tests {
 
     #[test]
     fn the_enum_indices_match_the_legacy_choice_order() {
-        assert_eq!(<rippler_dsp::models::ModalModel as Enum>::variants(), &MODELS);
-        assert_eq!(<rippler_dsp::mallet::MalletType as Enum>::variants(), &MALLETS);
+        assert_eq!(
+            <rippler_dsp::models::ModalModel as Enum>::variants(),
+            &MODELS
+        );
+        assert_eq!(
+            <rippler_dsp::mallet::MalletType as Enum>::variants(),
+            &MALLETS
+        );
         assert_eq!(PartialCount::variants(), &PARTIALS);
         assert_eq!(NoiseFilterMode::variants(), &FILTER_MODES);
         assert_eq!(Coupling::variants(), &COUPLINGS);
@@ -150,12 +156,18 @@ mod tests {
     fn the_enum_indices_round_trip() {
         for index in 0..MODELS.len() {
             let model = <rippler_dsp::models::ModalModel as Enum>::from_index(index);
-            assert_eq!(<rippler_dsp::models::ModalModel as Enum>::to_index(model), index);
+            assert_eq!(
+                <rippler_dsp::models::ModalModel as Enum>::to_index(model),
+                index
+            );
         }
 
         for index in 0..MALLETS.len() {
             let mallet = <rippler_dsp::mallet::MalletType as Enum>::from_index(index);
-            assert_eq!(<rippler_dsp::mallet::MalletType as Enum>::to_index(mallet), index);
+            assert_eq!(
+                <rippler_dsp::mallet::MalletType as Enum>::to_index(mallet),
+                index
+            );
         }
 
         for index in 0..PARTIALS.len() {
@@ -191,37 +203,34 @@ mod tests {
 
     #[test]
     fn the_partial_count_order_is_not_sorted() {
-        assert_eq!(PartialCount::variants(), ["4", "8", "16", "32", "64", "1", "2"]);
+        assert_eq!(
+            PartialCount::variants(),
+            ["4", "8", "16", "32", "64", "1", "2"]
+        );
         assert_eq!(PartialCount::from_index(5), PartialCount::One);
         assert_eq!(PartialCount::from_index(6), PartialCount::Two);
     }
 
     #[test]
     fn the_stable_ids_match_the_variants_in_order() {
-        fn check<T: Enum>(variants: &'static [&'static str], ids: &'static [&'static str]) {
+        fn check(variants: &'static [&'static str], ids: &'static [&'static str]) {
             assert_eq!(variants.len(), ids.len());
             for (index, id) in ids.iter().enumerate() {
                 assert!(!id.is_empty(), "the id at index {index} is empty");
-                assert!(
-                    !ids[..index].contains(id),
-                    "the id {id} is used twice"
-                );
+                assert!(!ids[..index].contains(id), "the id {id} is used twice");
             }
         }
 
-        check::<rippler_dsp::models::ModalModel>(
+        check(
             <rippler_dsp::models::ModalModel as Enum>::variants(),
             <rippler_dsp::models::ModalModel as Enum>::ids().unwrap(),
         );
-        check::<rippler_dsp::mallet::MalletType>(
+        check(
             <rippler_dsp::mallet::MalletType as Enum>::variants(),
             <rippler_dsp::mallet::MalletType as Enum>::ids().unwrap(),
         );
-        check::<PartialCount>(PartialCount::variants(), PartialCount::ids().unwrap());
-        check::<NoiseFilterMode>(
-            NoiseFilterMode::variants(),
-            NoiseFilterMode::ids().unwrap(),
-        );
-        check::<Coupling>(Coupling::variants(), Coupling::ids().unwrap());
+        check(PartialCount::variants(), PartialCount::ids().unwrap());
+        check(NoiseFilterMode::variants(), NoiseFilterMode::ids().unwrap());
+        check(Coupling::variants(), Coupling::ids().unwrap());
     }
 }

@@ -123,8 +123,13 @@ Add a `ModelTables` type to `models.rs` that owns `[Ratios; 12]` for each side, 
 
 **Files:**
 - Create: `rust/crates/rippler-dsp/src/sampler.rs`
-- Modify: `rust/crates/rippler-dsp/src/lib.rs` (add `pub mod sampler;`)
+- Create: `rust/crates/rippler-dsp/src/mallet.rs` (the `MalletType` enum only)
+- Modify: `rust/crates/rippler-dsp/src/lib.rs` (add `pub mod sampler;` and `pub mod mallet;`)
 - Modify: `rust/crates/rippler-dsp/Cargo.toml` (add `symphonia`)
+
+The `MalletType` enum lives in `mallet.rs`, and the sampler needs it to map a
+variant to its bundled sample, so the enum is created here and Task 2 adds the
+`Mallet` struct to the same file.
 
 - [ ] **Step 1: Declare the module and add the dependency**
 
@@ -149,7 +154,7 @@ It holds:
 - `impl Sampler`:
   - `new() -> Self`, with the C++'s defaults.
   - `set_pitch(&mut self, semis: f64)` — `pitchfactor = 2^(semis / 12)`.
-  - `load_encoded(&mut self, encoded: &str)` — decode base64 into raw `f64`s and append them to `waveform`, then set `is_user_file = true`. This is the format the JUCE plugin stores in its session state, so it must read the same bytes.
+  - `load_encoded(&mut self, encoded: &str)` — **clear** `waveform`, decode base64 into raw `f64`s, append them, then set `is_user_file = true`. This is the format the JUCE plugin stores in its session state, so it must read the same bytes. The C++ clears first, so a second load replaces the first rather than adding to it.
   - `load_internal_sample(&mut self, variant: MalletType)` — decode the bundled FLAC for that variant.
   - `load_sample(&mut self, path: &std::path::Path)` — decode a user file, falling back to `Sample1` when the file cannot be read.
   - `load_bytes(&mut self, bytes: &[u8]) -> bool` — decode a byte slice, returning whether it succeeded.
@@ -187,6 +192,10 @@ Add a `#[cfg(test)] mod tests` block with:
 - `loading_an_encoded_waveform_reads_the_doubles` — asserting that a base64 blob of known doubles round-trips exactly, and that `is_user_file` becomes true.
 - `loading_an_internal_sample_decodes_it` — asserting that each of the fourteen bundled samples decodes, that the waveform is not empty, that its peak is exactly 1.0, and that its length is `min(3 * wavesrate, source length)`.
 - `the_bundled_samples_have_the_expected_peak_and_length` — pinning the decoded length and peak of each of the fourteen, so a change in the decoder or in the bundled files is caught. Take these values from a first run and then verify them by hand against the files.
+
+  The peak is **not** always exactly `1.0`. The normalisation multiplies by the
+  reciprocal of the peak, so the result can land one unit in the last place below
+  one — `blop.flac` peaks at `0.9999999999999999`. Pin the real values.
 - `the_waveform_is_mono_and_truncated_to_three_seconds` — asserting the length rule.
 - `wave_lerp_interpolates_linearly_and_wraps` — asserting the wrap at the end of the waveform.
 - `wave_cubic_matches_the_catmull_rom_formula` — asserting against the formula, and that it wraps.
@@ -392,7 +401,7 @@ Add a `#[cfg(test)] mod tests` block with:
 - `the_noise_bursts_and_then_falls_silent` — asserting the envelope runs through its stages and the output ends at zero.
 - `the_noise_uses_the_supplied_generator` — asserting that two generators with the same seed produce the same output, and that different seeds produce different output. This is what makes the noise reproducible.
 - `the_filter_is_active_for_the_three_modes` — asserting `filter_active` for each mode and frequency combination the C++ checks.
-- `an_unknown_filter_mode_does_not_panic` — asserting the unknown mode is handled.
+- `an_unknown_filter_mode_does_not_panic` — the port uses `debug_assert!` in the unknown branch, so this test must catch the panic in a debug build while checking the release behaviour. The two requirements are otherwise contradictory.
 - `the_oscillator_path_shares_the_filter` — asserting that `process_osc` filters its input with the same coefficients.
 
 - [ ] **Step 4: Run the tests**
@@ -460,7 +469,7 @@ Its methods, ported from the C++:
 - `Voice::trigger(&mut self, timestamp: u64, srate: f64, note: i32, vel: f64, mallet_type: MalletType, mallet_freq: f64, mallet_ktrack: f64, skip_fadeout: bool, freq: f64, models: &ModelTables, sampler: &Sampler)`.
   The C++ computes the note's frequency inside `trigger`, calling into MTS-ESP. **Take the frequency as an argument** instead, so that this crate stays free of FFI. The plugin computes it, with `mts-client-rs` when microtuning is active.
 - `Voice::trigger_start(&mut self, reset: bool, models: &ModelTables, sampler: &Sampler)`.
-- `Voice::fade_out(&mut self) -> f64`.
+- `Voice::fade_out(&mut self, models: &ModelTables, sampler: &Sampler) -> f64`. It needs both, because `fadeOut` calls `triggerStart(true)`, which calls `updateResonators` and `mallet.trigger`.
 - `Voice::release(&mut self, timestamp: u64, models: &ModelTables)`.
 - `Voice::clear(&mut self)`.
 - `Voice::set_pitch(&mut self, a_coarse: f64, b_coarse: f64, a_fine: f64, b_fine: f64, pitch_bend: f64)`.
@@ -490,7 +499,11 @@ Add a `#[cfg(test)] mod tests` block with:
 - `triggering_a_voice_starts_it` — asserting that the voice becomes pressed, that the resonators activate and that the mallet and noise start.
 - `releasing_a_voice_marks_it_released` — asserting `is_release`, that `is_pressed` goes false, and that the noise releases.
 - `the_pitch_factor_follows_the_coarse_and_fine_pitch` — asserting `a_pitch_factor` is `2^((a_coarse + a_fine / 100) / 12)`.
-- `the_frequency_shift_is_symmetric` — asserting that `calc_frequency_shifts` leaves the two tables equal to each other when the models are equal, and that the shifts are zero.
+- `the_frequency_shift_is_symmetric` — asserting that `calc_frequency_shifts` leaves the two tables as mirror images when the models are equal, so that `a[i] + b[i] == 2 * model[i]`, and that the shifts stay small.
+
+  The shifts are **not** zero for identical models: the diagonal term contributes
+  a deliberate pseudo-random offset of `|split + cos(avg) / 5| / 2.5 / freq`. Assert
+  the symmetry and the magnitude, not that the shift vanishes.
 - `coupled_resonators_shift_apart` — asserting that two different models produce different shift tables.
 - `the_pitch_factor_scales_a_copy_of_the_model` — asserting that `apply_pitch` does not change the original table.
 - `the_djembe_model_is_computed_per_voice` — asserting that a djembe resonator's ratios follow the voice's frequency.

@@ -159,11 +159,12 @@ jobs:
 
       - name: Download the macOS artifact
         uses: actions/download-artifact@v4
+        # The macOS build can fail for want of runner capacity, in which case
+        # there is no artifact to download and the release goes out without it.
+        continue-on-error: true
         with:
           name: ripplerx-rust-macos
           path: artifacts/ripplerx-rust-macos
-          # The macOS build can be cancelled by a lack of runner capacity.
-          if-no-files-found: ignore
 
       - name: Download the Linux artifact
         uses: actions/download-artifact@v4

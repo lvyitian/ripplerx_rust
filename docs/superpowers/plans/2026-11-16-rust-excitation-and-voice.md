@@ -155,6 +155,14 @@ It holds:
   - `new() -> Self`, with the C++'s defaults.
   - `set_pitch(&mut self, semis: f64)` — `pitchfactor = 2^(semis / 12)`.
   - `load_encoded(&mut self, encoded: &str)` — **clear** `waveform`, decode base64 into raw `f64`s, append them, then set `is_user_file = true`. This is the format the JUCE plugin stores in its session state, so it must read the same bytes. The C++ clears first, so a second load replaces the first rather than adding to it.
+
+  **JUCE's base64 is not standard base64.** `MemoryBlock::toBase64Encoding` writes
+  the byte count, a dot, then the payload, using the alphabet
+  `".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+"` — index 0 is
+  `.` and there is no `/` — and packs the bits **LSB-first**. `fromBase64Encoding`
+  reads the count from before the dot and skips any character outside its decoding
+  table. A standard RFC 4648 decoder silently produces garbage here, so the format
+  is reproduced by hand rather than with a base64 crate.
   - `load_internal_sample(&mut self, variant: MalletType)` — decode the bundled FLAC for that variant.
   - `load_sample(&mut self, path: &std::path::Path)` — decode a user file, falling back to `Sample1` when the file cannot be read.
   - `load_bytes(&mut self, bytes: &[u8]) -> bool` — decode a byte slice, returning whether it succeeded.
@@ -573,6 +581,22 @@ git diff --stat <commit-before-this-plan>..HEAD -- src/ libs/ resources/ CMakeLi
 ```
 
 Expected: no output.
+
+## Notes for the next plan
+
+- `MalletType::from_index(index: u8) -> Option<MalletType>` turns the plugin's
+  choice index back into a variant, and `MalletType::ALL` lists every variant.
+- `utils::clamp_cpp` and `utils::clamp_cpp_inverted` are public and reproduce the
+  C++'s two clamp nestings, including their different NaN behaviour.
+- `Voice` has **no** `process` method, in the C++ or here. The plugin drives the
+  chain itself, as `PluginProcessor::processBlock` does: the mallet, then the
+  noise, then the two resonators, then the comb stereoizer and the limiter.
+- The sampler cannot be bit-identical to the JUCE build, because `symphonia`'s
+  FLAC-to-`f64` scaling differs from JUCE's by around 2⁻³¹ relative. The waveform is
+  peak-normalised immediately afterwards, so the difference is inaudible, but it
+  means the decoder's output must not be compared bit-for-bit with JUCE's.
+- The legacy XML reader must use **JUCE's** base64 for the `userSample` property,
+  not standard base64. See the note in Task 1.
 
 ## Notes for the next plan
 
